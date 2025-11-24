@@ -1,0 +1,32 @@
+name: CI - smoke test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps
+      - name: Syntax check
+        run: python -m py_compile scraper/*.py
+      - name: Smoke test
+        # Run a very small headless smoke test so CI is fast
+        run: python -m scraper.main --headless=True --max_search_pages=1 --max_buildings=1
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-artifacts
+          path: output/*.csv, output/*.log

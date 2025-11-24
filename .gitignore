@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.env
+.venv
+venv/
+.vscode/
+.idea/
+.DS_Store
+.playwright/
+output/
+*.log
+*.csv
+geocode_cache.json
+*.bak
