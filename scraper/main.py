@@ -1,8 +1,11 @@
 """
 Apartments.com Web Scraper for UMN Housing Research
-Complete main.py — quick visible test configuration (headless=False).
-To run a full headless overnight scrape, change headless=True and adjust the __main__ params.
+
+Usage:
+  python3 -m scraper.main --headless=False --max_search_pages=1 --max_buildings=2  # test run
+  python3 -m scraper.main --headless=True --max_search_pages=50 --max_buildings=800  # full run
 """
+import argparse
 import asyncio
 import csv
 import json
@@ -798,19 +801,22 @@ def export_to_csv(units: List[UnitListing], filename: Path):
     logger.info(f"Export complete: {filename}")
 
 
-async def main(max_search_pages: int = 25, max_buildings: int = None):
+async def main(headless: bool = True, max_search_pages: int = 25, max_buildings: int = None):
     logger.info("="*80)
     logger.info("UMN HOUSING SCRAPER STARTED")
     logger.info("="*80)
     logger.info(f"Search location: {SEARCH_LOCATION}")
     logger.info(f"Search radius: {SEARCH_RADIUS_KM} km from UMN campus")
+    logger.info(f"Headless mode: {headless}")
+    logger.info(f"Max search pages: {max_search_pages}")
+    logger.info(f"Max buildings: {max_buildings if max_buildings else 'unlimited'}")
     logger.info(f"Output file: {OUTPUT_CSV}")
 
     all_units: List[UnitListing] = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=True,  # run headless for overnight/full runs (updated)
+            headless=headless,
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--disable-dev-shm-usage',
@@ -876,6 +882,49 @@ async def main(max_search_pages: int = 25, max_buildings: int = None):
     logger.info(f"Log: {LOG_FILE}")
 
 
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Apartments.com Web Scraper for UMN Housing Research',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Test run (visible browser, 1 page, 2 buildings)
+  python3 -m scraper.main --headless=False --max_search_pages=1 --max_buildings=2
+
+  # Full headless run (background scrape)
+  python3 -m scraper.main --headless=True --max_search_pages=50 --max_buildings=800
+
+  # Overnight run with no building limit
+  nohup python3 -m scraper.main --headless=True --max_search_pages=100 > output/run.log 2>&1 &
+        """
+    )
+    parser.add_argument(
+        '--headless',
+        type=str,
+        default='True',
+        help='Run browser in headless mode (True/False). Default: True'
+    )
+    parser.add_argument(
+        '--max_search_pages',
+        type=int,
+        default=50,
+        help='Maximum number of search result pages to scrape. Default: 50'
+    )
+    parser.add_argument(
+        '--max_buildings',
+        type=int,
+        default=None,
+        help='Maximum number of buildings to scrape. Default: unlimited'
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    # Full overnight run (headless) - larger sweep
-    asyncio.run(main(max_search_pages=50, max_buildings=800))
+    args = parse_args()
+    headless = args.headless.lower() in ('true', '1', 'yes')
+    asyncio.run(main(
+        headless=headless,
+        max_search_pages=args.max_search_pages,
+        max_buildings=args.max_buildings
+    ))
