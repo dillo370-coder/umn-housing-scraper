@@ -899,10 +899,22 @@ Examples:
   nohup python3 -m scraper.main --headless=True --max_search_pages=100 > output/run.log 2>&1 &
         """
     )
+
+    def str_to_bool(value):
+        """Convert string to boolean for argparse."""
+        if isinstance(value, bool):
+            return value
+        if value.lower() in ('true', '1', 'yes', 'on'):
+            return True
+        elif value.lower() in ('false', '0', 'no', 'off'):
+            return False
+        else:
+            raise argparse.ArgumentTypeError(f"Boolean value expected, got '{value}'")
+
     parser.add_argument(
         '--headless',
-        type=str,
-        default='True',
+        type=str_to_bool,
+        default=True,
         help='Run browser in headless mode (True/False). Default: True'
     )
     parser.add_argument(
@@ -922,9 +934,8 @@ Examples:
 
 if __name__ == "__main__":
     args = parse_args()
-    headless = args.headless.lower() in ('true', '1', 'yes')
     asyncio.run(main(
-        headless=headless,
+        headless=args.headless,
         max_search_pages=args.max_search_pages,
         max_buildings=args.max_buildings
     ))
