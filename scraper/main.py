@@ -4,20 +4,24 @@ Apartments.com Web Scraper for UMN Housing Research
 Usage:
   python3 -m scraper.main --headless=False --max_search_pages=1 --max_buildings=2  # test run
   python3 -m scraper.main --headless=True --max_search_pages=50 --max_buildings=800  # full run
+  python3 -m scraper.main --auto_restart --max_sessions=5 --session_cooldown=300  # auto-restart mode
 """
 import argparse
 import asyncio
 import csv
 import json
 import logging
+import os
 import random
 import re
+import signal
+import sys
 import time
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime
 from math import radians, cos, sin, asin, sqrt
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 from urllib.parse import urljoin
 
 from playwright.async_api import async_playwright, Page
@@ -54,6 +58,10 @@ TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 OUTPUT_CSV = OUTPUT_DIR / f"umn_housing_data_{TIMESTAMP}.csv"
 OUTPUT_CSV_ALL = OUTPUT_DIR / f"umn_housing_ALL_{TIMESTAMP}.csv"
 LOG_FILE = OUTPUT_DIR / f"scraper_log_{TIMESTAMP}.log"
+
+# Persistent output file for accumulating results across sessions
+PERSISTENT_CSV = OUTPUT_DIR / "umn_housing_combined.csv"
+SCRAPED_URLS_FILE = OUTPUT_DIR / "scraped_urls.txt"
 
 # Student housing keywords
 STUDENT_KEYWORDS = [
@@ -139,6 +147,113 @@ class UnitListing:
 
     scrape_date: str = field(default_factory=lambda: datetime.now().isoformat())
     source_url: str = ""
+
+
+# ============================================================================
+# PERSISTENCE AND DEDUPLICATION
+# ============================================================================
+
+def load_existing_listings(csv_path: Path) -> Dict[str, UnitListing]:
+    """Load existing listings from CSV file into a dict keyed by listing_id."""
+    existing = {}
+    if csv_path.exists():
+        try:
+            with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    listing_id = row.get('listing_id', '')
+                    if listing_id:
+                        # Convert string values back to appropriate types
+                        for key in ['lat', 'lon', 'dist_to_campus_km', 'beds', 'baths', 'rent_min', 'rent_max']:
+                            if key in row and row[key]:
+                                try:
+                                    row[key] = float(row[key])
+                                except (ValueError, TypeError):
+                                    row[key] = None
+                        for key in ['sqft', 'year_built', 'num_units', 'stories']:
+                            if key in row and row[key]:
+                                try:
+                                    row[key] = int(float(row[key]))
+                                except (ValueError, TypeError):
+                                    row[key] = None
+                        for key in ['is_per_bed', 'is_shared_bedroom', 'has_in_unit_laundry', 
+                                    'has_on_site_laundry', 'has_dishwasher', 'has_ac',
+                                    'has_heat_included', 'has_water_included', 'has_internet_included',
+                                    'is_furnished', 'has_gym', 'has_pool', 'has_rooftop_or_clubroom',
+                                    'has_parking_available', 'has_garage', 'pets_allowed', 'is_student_branded']:
+                            if key in row:
+                                if row[key] in ('True', 'true', '1'):
+                                    row[key] = True
+                                elif row[key] in ('False', 'false', '0'):
+                                    row[key] = False
+                                else:
+                                    row[key] = None
+                        existing[listing_id] = row
+            logger.info(f"Loaded {len(existing)} existing listings from {csv_path}")
+        except Exception as e:
+            logger.warning(f"Error loading existing listings: {e}")
+    return existing
+
+
+def load_scraped_urls(filepath: Path) -> Set[str]:
+    """Load set of already-scraped building URLs."""
+    urls = set()
+    if filepath.exists():
+        try:
+            with open(filepath, 'r') as f:
+                urls = set(line.strip() for line in f if line.strip())
+            logger.info(f"Loaded {len(urls)} previously scraped URLs")
+        except Exception as e:
+            logger.warning(f"Error loading scraped URLs: {e}")
+    return urls
+
+
+def save_scraped_url(filepath: Path, url: str):
+    """Append a scraped URL to the tracking file."""
+    try:
+        with open(filepath, 'a') as f:
+            f.write(url + '\n')
+    except Exception as e:
+        logger.warning(f"Error saving scraped URL: {e}")
+
+
+def merge_and_dedupe_units(new_units: List[UnitListing], existing: Dict[str, Any]) -> List[UnitListing]:
+    """Merge new units with existing, keeping only unique listing_ids."""
+    merged = dict(existing)  # Start with existing
+    new_count = 0
+    for unit in new_units:
+        if unit.listing_id not in merged:
+            merged[unit.listing_id] = asdict(unit)
+            new_count += 1
+    logger.info(f"Added {new_count} new unique listings (total: {len(merged)})")
+    
+    # Convert back to UnitListing objects
+    result = []
+    for listing_id, data in merged.items():
+        if isinstance(data, dict):
+            # Filter only valid UnitListing fields
+            valid_fields = {f.name for f in fields(UnitListing)}
+            filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+            try:
+                result.append(UnitListing(**filtered_data))
+            except Exception as e:
+                logger.warning(f"Error creating UnitListing from data: {e}")
+        elif isinstance(data, UnitListing):
+            result.append(data)
+    return result
+
+
+def export_combined_csv(units: List[UnitListing], filename: Path):
+    """Export all units to a combined CSV, overwriting previous."""
+    fieldnames = list(UnitListing.__dataclass_fields__.keys())
+    logger.info(f"Saving {len(units)} total listings to {filename}")
+    with open(filename, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        if units:
+            rows = [asdict(u) for u in units]
+            writer.writerows(rows)
+    logger.info(f"Combined CSV saved: {filename}")
 
 
 # ============================================================================
@@ -820,7 +935,20 @@ def export_to_csv(units: List[UnitListing], filename: Path):
     logger.info(f"Export complete: {filename}")
 
 
-async def main(headless: bool = True, max_search_pages: int = 25, max_buildings: int = None):
+async def main(headless: bool = True, max_search_pages: int = 25, max_buildings: int = None, 
+               skip_scraped: bool = False) -> int:
+    """
+    Main scraping function. Returns the number of units scraped in this session.
+    
+    Args:
+        headless: Run browser in headless mode
+        max_search_pages: Max search result pages to scrape
+        max_buildings: Max buildings to scrape (None = unlimited)
+        skip_scraped: Skip buildings that were already scraped (for auto-restart mode)
+    
+    Returns:
+        Number of units scraped in this session
+    """
     logger.info("="*80)
     logger.info("UMN HOUSING SCRAPER STARTED")
     logger.info("="*80)
@@ -829,9 +957,13 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
     logger.info(f"Headless mode: {headless}")
     logger.info(f"Max search pages: {max_search_pages}")
     logger.info(f"Max buildings: {max_buildings if max_buildings else 'unlimited'}")
+    logger.info(f"Skip already scraped: {skip_scraped}")
     logger.info(f"Output file: {OUTPUT_CSV}")
 
     all_units: List[UnitListing] = []
+    scraped_urls = load_scraped_urls(SCRAPED_URLS_FILE) if skip_scraped else set()
+    consecutive_failures = 0
+    max_consecutive_failures = 10  # Stop session if too many failures in a row
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -872,6 +1004,12 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
         try:
             building_urls = await search_apartments(page, SEARCH_LOCATION, max_search_pages)
 
+            # Filter out already-scraped URLs
+            if skip_scraped and scraped_urls:
+                original_count = len(building_urls)
+                building_urls = [url for url in building_urls if url not in scraped_urls]
+                logger.info(f"Filtered out {original_count - len(building_urls)} already-scraped buildings")
+
             if max_buildings:
                 building_urls = building_urls[:max_buildings]
                 logger.info(f"Limited to {max_buildings} buildings for testing")
@@ -880,10 +1018,29 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
                 logger.info(f"Processing building {idx}/{len(building_urls)}")
                 try:
                     units = await scrape_building(page, url)
-                    all_units.extend(units)
+                    if units:
+                        all_units.extend(units)
+                        consecutive_failures = 0  # Reset on success
+                        # Track this URL as scraped
+                        save_scraped_url(SCRAPED_URLS_FILE, url)
+                    else:
+                        consecutive_failures += 1
                     logger.info(f"Total units collected: {len(all_units)}")
                 except Exception as e:
                     logger.error(f"Failed to scrape {url}: {e}")
+                    consecutive_failures += 1
+                    
+                    # Check for bot detection indicators
+                    error_str = str(e).lower()
+                    if 'access denied' in error_str or 'blocked' in error_str or 'captcha' in error_str:
+                        logger.warning("Bot detection likely triggered!")
+                        if consecutive_failures >= 3:
+                            logger.error("Multiple consecutive failures - ending session early")
+                            break
+
+                if consecutive_failures >= max_consecutive_failures:
+                    logger.error(f"Too many consecutive failures ({consecutive_failures}) - ending session")
+                    break
 
                 await asyncio.sleep(PAGE_DELAY_SECONDS)
 
@@ -898,17 +1055,103 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
     filtered_units = geocode_and_filter_units(all_units)
     export_to_csv(filtered_units, OUTPUT_CSV)
 
+    # Also update the combined/persistent CSV
+    existing_listings = load_existing_listings(PERSISTENT_CSV)
+    merged_units = merge_and_dedupe_units(filtered_units, existing_listings)
+    export_combined_csv(merged_units, PERSISTENT_CSV)
+
     logger.info("="*80)
     logger.info("SCRAPING COMPLETE")
     logger.info("="*80)
-    logger.info(f"Total units scraped: {len(all_units)}")
+    logger.info(f"This session scraped: {len(all_units)} units")
     logger.info(f"Units within {SEARCH_RADIUS_KM} km: {len(filtered_units)}")
+    logger.info(f"Total accumulated (deduplicated): {len(merged_units)}")
     logger.info(f"Unique buildings: {len(set(u.building_name for u in filtered_units))}")
     logger.info(f"Student-branded properties: {sum(1 for u in filtered_units if u.is_student_branded)}")
     logger.info(f"Per-bed pricing detected: {sum(1 for u in filtered_units if u.is_per_bed)}")
-    logger.info(f"Unfiltered data: {OUTPUT_CSV_ALL}")
-    logger.info(f"Filtered data: {OUTPUT_CSV}")
+    logger.info(f"Session data: {OUTPUT_CSV}")
+    logger.info(f"Combined data: {PERSISTENT_CSV}")
     logger.info(f"Log: {LOG_FILE}")
+    
+    return len(all_units)
+
+
+async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10, 
+                                max_buildings: int = 50, max_sessions: int = 5,
+                                session_cooldown: int = 300, target_listings: int = 1000):
+    """
+    Automatically run multiple scraping sessions with cooldowns between them.
+    
+    Args:
+        headless: Run browser in headless mode
+        max_search_pages: Max search pages per session
+        max_buildings: Max buildings per session
+        max_sessions: Maximum number of sessions to run
+        session_cooldown: Seconds to wait between sessions (default 5 minutes)
+        target_listings: Stop when this many total listings are collected
+    """
+    logger.info("="*80)
+    logger.info("AUTO-RESTART MODE ENABLED")
+    logger.info("="*80)
+    logger.info(f"Max sessions: {max_sessions}")
+    logger.info(f"Cooldown between sessions: {session_cooldown} seconds")
+    logger.info(f"Target listings: {target_listings}")
+    logger.info(f"Buildings per session: {max_buildings}")
+    
+    total_scraped = 0
+    session_num = 0
+    
+    while session_num < max_sessions:
+        session_num += 1
+        logger.info(f"\n{'='*80}")
+        logger.info(f"STARTING SESSION {session_num}/{max_sessions}")
+        logger.info(f"{'='*80}\n")
+        
+        try:
+            # Run a session, skipping already-scraped buildings
+            units_scraped = await main(
+                headless=headless,
+                max_search_pages=max_search_pages,
+                max_buildings=max_buildings,
+                skip_scraped=True
+            )
+            total_scraped += units_scraped
+            
+            # Check if we've reached target
+            existing = load_existing_listings(PERSISTENT_CSV)
+            total_listings = len(existing)
+            logger.info(f"Total accumulated listings: {total_listings}")
+            
+            if total_listings >= target_listings:
+                logger.info(f"✓ Reached target of {target_listings} listings!")
+                break
+                
+            if units_scraped == 0:
+                logger.warning("Session produced 0 units - may be blocked")
+                # Increase cooldown if blocked
+                extended_cooldown = session_cooldown * 2
+                logger.info(f"Extended cooldown: {extended_cooldown} seconds")
+                await asyncio.sleep(extended_cooldown)
+            elif session_num < max_sessions:
+                logger.info(f"Cooling down for {session_cooldown} seconds before next session...")
+                await asyncio.sleep(session_cooldown)
+                
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user - stopping auto-restart")
+            break
+        except Exception as e:
+            logger.error(f"Session {session_num} failed with error: {e}")
+            logger.info(f"Waiting {session_cooldown} seconds before retry...")
+            await asyncio.sleep(session_cooldown)
+    
+    # Final summary
+    existing = load_existing_listings(PERSISTENT_CSV)
+    logger.info("\n" + "="*80)
+    logger.info("AUTO-RESTART COMPLETE")
+    logger.info("="*80)
+    logger.info(f"Sessions run: {session_num}")
+    logger.info(f"Total unique listings collected: {len(existing)}")
+    logger.info(f"Combined data file: {PERSISTENT_CSV}")
 
 
 def parse_args():
@@ -924,8 +1167,11 @@ Examples:
   # Full headless run (background scrape)
   python3 -m scraper.main --headless=True --max_search_pages=50 --max_buildings=800
 
-  # Overnight run with no building limit
-  nohup python3 -m scraper.main --headless=True --max_search_pages=100 > output/run.log 2>&1 &
+  # Auto-restart mode (runs multiple sessions, deduplicates, accumulates results)
+  python3 -m scraper.main --auto_restart --max_sessions=5 --session_cooldown=300 --target_listings=1000
+
+  # Overnight auto-restart (runs until target reached or max sessions)
+  nohup python3 -m scraper.main --auto_restart --headless=True --max_sessions=10 --target_listings=2000 > output/auto.log 2>&1 &
         """
     )
 
@@ -956,15 +1202,54 @@ Examples:
         '--max_buildings',
         type=int,
         default=None,
-        help='Maximum number of buildings to scrape. Default: unlimited'
+        help='Maximum number of buildings to scrape per session. Default: unlimited'
     )
+    
+    # Auto-restart mode arguments
+    parser.add_argument(
+        '--auto_restart',
+        action='store_true',
+        help='Enable auto-restart mode: runs multiple sessions with cooldowns, deduplicates results'
+    )
+    parser.add_argument(
+        '--max_sessions',
+        type=int,
+        default=5,
+        help='Maximum number of sessions in auto-restart mode. Default: 5'
+    )
+    parser.add_argument(
+        '--session_cooldown',
+        type=int,
+        default=300,
+        help='Seconds to wait between sessions in auto-restart mode. Default: 300 (5 minutes)'
+    )
+    parser.add_argument(
+        '--target_listings',
+        type=int,
+        default=1000,
+        help='Stop auto-restart when this many listings are collected. Default: 1000'
+    )
+    
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    asyncio.run(main(
-        headless=args.headless,
-        max_search_pages=args.max_search_pages,
-        max_buildings=args.max_buildings
-    ))
+    
+    if args.auto_restart:
+        # Auto-restart mode
+        asyncio.run(auto_restart_scraper(
+            headless=args.headless,
+            max_search_pages=args.max_search_pages,
+            max_buildings=args.max_buildings or 50,  # Default to 50 per session in auto mode
+            max_sessions=args.max_sessions,
+            session_cooldown=args.session_cooldown,
+            target_listings=args.target_listings
+        ))
+    else:
+        # Single session mode
+        asyncio.run(main(
+            headless=args.headless,
+            max_search_pages=args.max_search_pages,
+            max_buildings=args.max_buildings
+        ))

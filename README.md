@@ -14,6 +14,7 @@ This scraper collects address-level apartment listing data for hedonic housing a
 - Geocodes addresses using OpenStreetMap Nominatim
 - Filters results by distance to UMN campus (10 km radius)
 - Exports R-friendly CSV with lowercase_snake_case columns
+- **Auto-restart mode**: Automatically runs multiple sessions with cooldowns, deduplicates results, and accumulates listings until target reached
 
 ## Quick Start
 
@@ -39,27 +40,53 @@ python3 -m scraper.main --headless=False --max_search_pages=1 --max_buildings=2
 python3 -m scraper.main --headless=True --max_search_pages=50 --max_buildings=800
 ```
 
-### 4. Overnight Run (background)
+### 4. Auto-Restart Mode (recommended for large datasets)
+
+The auto-restart mode automatically:
+- Runs multiple scraping sessions with cooldowns between them
+- Skips buildings already scraped in previous sessions
+- Deduplicates results and accumulates them in a single combined CSV
+- Stops when target number of listings is reached
 
 ```bash
-nohup python3 -m scraper.main --headless=True --max_search_pages=100 > output/overnight.log 2>&1 &
+# Run with auto-restart (5 sessions, 5-min cooldowns, target 1000 listings)
+python3 -m scraper.main --auto_restart --max_sessions=5 --session_cooldown=300 --target_listings=1000
+
+# Overnight auto-restart (10 sessions, 2000 listing target)
+nohup python3 -m scraper.main --auto_restart --headless=True --max_sessions=10 --target_listings=2000 > output/auto.log 2>&1 &
 ```
 
 ## Command-Line Options
+
+### Basic Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--headless` | `True` | Run browser in headless mode (True/False) |
 | `--max_search_pages` | `50` | Maximum search result pages to scrape |
-| `--max_buildings` | unlimited | Maximum buildings to scrape |
+| `--max_buildings` | unlimited | Maximum buildings to scrape per session |
+
+### Auto-Restart Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--auto_restart` | off | Enable auto-restart mode |
+| `--max_sessions` | `5` | Maximum number of sessions to run |
+| `--session_cooldown` | `300` | Seconds to wait between sessions (5 min default) |
+| `--target_listings` | `1000` | Stop when this many listings are collected |
 
 ## Output
 
 All output files are saved to `output/` (git-ignored):
 
-- `umn_housing_data_{timestamp}.csv` - Filtered data (within 10 km of UMN)
-- `umn_housing_ALL_{timestamp}.csv` - All scraped data (unfiltered)
+### Per-Session Files
+- `umn_housing_data_{timestamp}.csv` - Filtered data from this session (within 10 km of UMN)
+- `umn_housing_ALL_{timestamp}.csv` - All scraped data from this session (unfiltered)
 - `scraper_log_{timestamp}.log` - Detailed log file
+
+### Accumulated Files (for auto-restart mode)
+- `umn_housing_combined.csv` - **All unique listings** accumulated across sessions (deduplicated)
+- `scraped_urls.txt` - Tracking file for buildings already scraped (prevents duplicates)
 
 ### CSV Schema
 
@@ -89,7 +116,10 @@ All output files are saved to `output/` (git-ignored):
 library(readr)
 library(dplyr)
 
-# Load the data
+# Load the combined data (accumulated across sessions)
+df <- read_csv("output/umn_housing_combined.csv")
+
+# Or load a specific session's data
 df <- read_csv("output/umn_housing_data_YYYYMMDD_HHMMSS.csv")
 
 # Example: Filter to Dinkytown area (within 1 km of campus)
@@ -116,6 +146,20 @@ df %>%
 - Uses polite geocoding with Nominatim (includes email in requests)
 - Handles missing data gracefully (NA values for missing fields)
 - Student housing detection via keyword matching in property descriptions
+- Auto-restart mode handles bot detection by pausing between sessions
+
+## Troubleshooting
+
+**"Access Denied" or bot detection:**
+- Use `--headless=False` to appear more like a real browser
+- Increase `--session_cooldown` to give more time between sessions
+- Run during off-peak hours (late night/early morning)
+- Try a different network (some are blocked more aggressively)
+
+**0 units scraped:**
+- Check the log file for specific errors
+- The site may be blocking - wait and try again later
+- Use auto-restart mode which handles this automatically
 
 ## License
 
