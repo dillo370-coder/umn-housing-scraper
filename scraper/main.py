@@ -10,6 +10,7 @@ import asyncio
 import csv
 import json
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass, asdict, field
@@ -34,9 +35,17 @@ SEARCH_RADIUS_KM = 10.0  # 10 km radius (updated)
 BASE_URL = "https://www.apartments.com"
 SEARCH_LOCATION = "Minneapolis, MN"
 
-# Rate limiting
-PAGE_DELAY_SECONDS = 3.5
+# Rate limiting (increase if getting blocked)
+PAGE_DELAY_SECONDS = 4.0
 GEOCODE_DELAY_SECONDS = 1.5
+
+# User agents to rotate (helps avoid bot detection)
+USER_AGENTS = [
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+]
 
 # Output
 OUTPUT_DIR = Path("output")
@@ -372,18 +381,28 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10) -> L
         search_url = f"{BASE_URL}/{location.lower().replace(' ', '-').replace(',', '')}/"
         logger.info(f"Navigating to: {search_url}")
 
-        for attempt in range(3):
+        for attempt in range(5):  # Increased retries
             try:
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
                 await asyncio.sleep(PAGE_DELAY_SECONDS)
                 # Wait for common result container
-                await page.wait_for_selector('article.placard, .placard', timeout=15000)
+                await page.wait_for_selector('article.placard, .placard', timeout=20000)
                 break
             except Exception as e:
+                error_str = str(e)
                 logger.warning(f"Attempt {attempt + 1} failed: {e}")
-                if attempt == 2:
+                
+                # For HTTP2 errors, wait longer before retry
+                if 'ERR_HTTP2' in error_str or 'PROTOCOL_ERROR' in error_str:
+                    wait_time = 10 + (attempt * 5)  # 10, 15, 20, 25, 30 seconds
+                    logger.info(f"HTTP/2 error detected. Waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
+                elif attempt < 4:
+                    await asyncio.sleep(5 + attempt * 2)
+                else:
+                    logger.error("Max retries reached. Try running with --headless=False to debug.")
+                    logger.error("If issue persists, check your network connection or try later.")
                     raise
-                await asyncio.sleep(5)
 
         for page_num in range(1, max_pages + 1):
             logger.info(f"Scraping search results page {page_num}")
@@ -820,21 +839,31 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--disable-dev-shm-usage',
-                '--no-sandbox'
+                '--no-sandbox',
+                '--disable-http2',  # Fix for ERR_HTTP2_PROTOCOL_ERROR
             ]
         )
 
+        # Select a random user agent to help avoid detection
+        selected_user_agent = random.choice(USER_AGENTS)
+        logger.info(f"Using user agent: {selected_user_agent[:50]}...")
+
         context = await browser.new_context(
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            user_agent=selected_user_agent,
             viewport={'width': 1920, 'height': 1080},
             locale='en-US',
             timezone_id='America/Chicago',
             extra_http_headers={
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
                 'DNT': '1',
                 'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
             }
         )
 
