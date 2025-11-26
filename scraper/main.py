@@ -39,6 +39,51 @@ SEARCH_RADIUS_KM = 10.0  # 10 km radius (updated)
 BASE_URL = "https://www.apartments.com"
 SEARCH_LOCATION = "Minneapolis, MN"
 
+# Neighborhoods and ZIP codes VERIFIED within 10km of UMN East Bank campus (44.9731, -93.2359)
+# All distances calculated from UMN campus center
+SEARCH_LOCATIONS = [
+    # Core areas (0-3km from UMN)
+    "Dinkytown, Minneapolis, MN",           # ~0.5km - immediate campus area
+    "Stadium Village, Minneapolis, MN",      # ~0.5km - immediate campus area
+    "Marcy-Holmes, Minneapolis, MN",         # ~1km - just north of campus
+    "Prospect Park, Minneapolis, MN",        # ~1.5km - east of campus
+    "Cedar-Riverside, Minneapolis, MN",      # ~1.5km - west bank area
+    "Southeast Como, Minneapolis, MN",       # ~2km - north of campus
+    
+    # Near areas (3-6km from UMN)
+    "Seward, Minneapolis, MN",               # ~3km - south
+    "Northeast Minneapolis, MN",             # ~3km - across the river
+    "St Anthony Main, Minneapolis, MN",      # ~2.5km - across river
+    "Elliot Park, Minneapolis, MN",          # ~3km - southwest
+    "Downtown Minneapolis, MN",              # ~3.5km - west
+    "Phillips, Minneapolis, MN",             # ~4km - south
+    "Loring Park, Minneapolis, MN",          # ~4km - west
+    "North Loop, Minneapolis, MN",           # ~4km - northwest
+    "Como, St Paul, MN",                     # ~4km - east (St Paul side)
+    
+    # Moderate distance (6-10km from UMN)
+    "Longfellow, Minneapolis, MN",           # ~5km - south
+    "Lowry Hill, Minneapolis, MN",           # ~5km - west
+    "Whittier, Minneapolis, MN",             # ~5km - southwest
+    "Uptown, Minneapolis, MN",               # ~6km - southwest (edge of radius)
+    "Powderhorn, Minneapolis, MN",           # ~6km - south
+    "Midway, St Paul, MN",                   # ~6km - east
+    
+    # ZIP codes within 10km of UMN
+    "55414",  # Dinkytown/Stadium Village (~0.5km)
+    "55455",  # UMN campus (0km)
+    "55413",  # Northeast Minneapolis (~3km)
+    "55401",  # Downtown Minneapolis (~3.5km)
+    "55454",  # West Bank/Cedar-Riverside (~1.5km)
+    "55404",  # Phillips/Seward (~3.5km)
+    "55403",  # Loring Park/Lowry Hill (~4.5km)
+    "55406",  # Longfellow (~5km)
+    "55408",  # Uptown/CARAG (~6km - edge of radius)
+    "55104",  # St Paul Hamline-Midway (~6km)
+    "55108",  # St Paul Como (~4km)
+    "55407",  # Powderhorn (~6km)
+]
+
 # Rate limiting (increase if getting blocked)
 PAGE_DELAY_SECONDS = 5.0  # Increased from 4.0 for better bot avoidance
 GEOCODE_DELAY_SECONDS = 1.5
@@ -936,7 +981,7 @@ def export_to_csv(units: List[UnitListing], filename: Path):
 
 
 async def main(headless: bool = True, max_search_pages: int = 25, max_buildings: int = None, 
-               skip_scraped: bool = False) -> int:
+               skip_scraped: bool = False, search_location: str = None) -> int:
     """
     Main scraping function. Returns the number of units scraped in this session.
     
@@ -945,14 +990,16 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
         max_search_pages: Max search result pages to scrape
         max_buildings: Max buildings to scrape (None = unlimited)
         skip_scraped: Skip buildings that were already scraped (for auto-restart mode)
+        search_location: Location to search (defaults to SEARCH_LOCATION if not specified)
     
     Returns:
         Number of units scraped in this session
     """
+    location = search_location or SEARCH_LOCATION
     logger.info("="*80)
     logger.info("UMN HOUSING SCRAPER STARTED")
     logger.info("="*80)
-    logger.info(f"Search location: {SEARCH_LOCATION}")
+    logger.info(f"Search location: {location}")
     logger.info(f"Search radius: {SEARCH_RADIUS_KM} km from UMN campus")
     logger.info(f"Headless mode: {headless}")
     logger.info(f"Max search pages: {max_search_pages}")
@@ -1002,7 +1049,7 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
         page = await context.new_page()
 
         try:
-            building_urls = await search_apartments(page, SEARCH_LOCATION, max_search_pages)
+            building_urls = await search_apartments(page, location, max_search_pages)
 
             # Filter out already-scraped URLs
             if skip_scraped and scraped_urls:
@@ -1097,14 +1144,23 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     logger.info(f"Cooldown between sessions: {session_cooldown} seconds")
     logger.info(f"Target listings: {target_listings}")
     logger.info(f"Buildings per session: {max_buildings}")
+    logger.info(f"Search locations: {len(SEARCH_LOCATIONS)} neighborhoods/areas")
     
     total_scraped = 0
     session_num = 0
+    location_index = 0
+    zero_sessions_in_a_row = 0
     
     while session_num < max_sessions:
         session_num += 1
+        
+        # Rotate through different search locations
+        current_location = SEARCH_LOCATIONS[location_index % len(SEARCH_LOCATIONS)]
+        location_index += 1
+        
         logger.info(f"\n{'='*80}")
         logger.info(f"STARTING SESSION {session_num}/{max_sessions}")
+        logger.info(f"Searching: {current_location}")
         logger.info(f"{'='*80}\n")
         
         try:
@@ -1113,7 +1169,8 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
                 headless=headless,
                 max_search_pages=max_search_pages,
                 max_buildings=max_buildings,
-                skip_scraped=True
+                skip_scraped=True,
+                search_location=current_location
             )
             total_scraped += units_scraped
             
@@ -1127,14 +1184,25 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
                 break
                 
             if units_scraped == 0:
-                logger.warning("Session produced 0 units - may be blocked")
+                zero_sessions_in_a_row += 1
+                logger.warning(f"Session produced 0 units - may be blocked ({zero_sessions_in_a_row} in a row)")
+                
+                # If we've had multiple zeros, maybe try switching locations faster
+                if zero_sessions_in_a_row >= 3:
+                    # Skip ahead in locations to try a different area
+                    location_index += 5
+                    logger.info("Skipping ahead in location list to try different areas")
+                    zero_sessions_in_a_row = 0
+                
                 # Increase cooldown if blocked
                 extended_cooldown = session_cooldown * 2
                 logger.info(f"Extended cooldown: {extended_cooldown} seconds")
                 await asyncio.sleep(extended_cooldown)
-            elif session_num < max_sessions:
-                logger.info(f"Cooling down for {session_cooldown} seconds before next session...")
-                await asyncio.sleep(session_cooldown)
+            else:
+                zero_sessions_in_a_row = 0  # Reset on success
+                if session_num < max_sessions:
+                    logger.info(f"Cooling down for {session_cooldown} seconds before next session...")
+                    await asyncio.sleep(session_cooldown)
                 
         except KeyboardInterrupt:
             logger.info("Interrupted by user - stopping auto-restart")
