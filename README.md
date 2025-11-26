@@ -71,8 +71,8 @@ nohup python3 -m scraper.main --auto_restart --headless=True --max_sessions=10 -
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--auto_restart` | off | Enable auto-restart mode |
-| `--max_sessions` | `5` | Maximum number of sessions to run |
-| `--session_cooldown` | `300` | Seconds to wait between sessions (5 min default) |
+| `--max_sessions` | `50` | Maximum number of sessions to run |
+| `--session_cooldown` | `600` | Seconds to wait between sessions (10 min default) |
 | `--target_listings` | `1000` | Stop when this many listings are collected |
 
 ## Output

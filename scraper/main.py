@@ -40,7 +40,7 @@ BASE_URL = "https://www.apartments.com"
 SEARCH_LOCATION = "Minneapolis, MN"
 
 # Rate limiting (increase if getting blocked)
-PAGE_DELAY_SECONDS = 4.0
+PAGE_DELAY_SECONDS = 5.0  # Increased from 4.0 for better bot avoidance
 GEOCODE_DELAY_SECONDS = 1.5
 
 # User agents to rotate (helps avoid bot detection)
@@ -1214,14 +1214,14 @@ Examples:
     parser.add_argument(
         '--max_sessions',
         type=int,
-        default=5,
-        help='Maximum number of sessions in auto-restart mode. Default: 5'
+        default=50,
+        help='Maximum number of sessions in auto-restart mode. Default: 50'
     )
     parser.add_argument(
         '--session_cooldown',
         type=int,
-        default=300,
-        help='Seconds to wait between sessions in auto-restart mode. Default: 300 (5 minutes)'
+        default=600,
+        help='Seconds to wait between sessions in auto-restart mode. Default: 600 (10 minutes)'
     )
     parser.add_argument(
         '--target_listings',
