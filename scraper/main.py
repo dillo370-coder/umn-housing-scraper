@@ -1389,6 +1389,12 @@ Examples:
 
   # Overnight auto-restart (runs until target reached or max sessions)
   nohup python3 -m scraper.main --auto_restart --headless=True --max_sessions=10 --target_listings=2000 > output/auto.log 2>&1 &
+
+  # Direct URL scraping (re-scrape specific buildings)
+  python3 -m scraper.main --scrape_urls --headless=False
+  
+  # Direct URL scraping from a file
+  python3 -m scraper.main --scrape_urls --url_file=my_urls.txt --headless=False
         """
     )
 
@@ -1447,13 +1453,155 @@ Examples:
         help='Stop auto-restart when this many listings are collected. Default: 1000'
     )
     
+    # Direct URL scraping mode
+    parser.add_argument(
+        '--scrape_urls',
+        action='store_true',
+        help='Scrape specific URLs directly (uses KNOWN_SCRAPED_URLS list or --url_file)'
+    )
+    parser.add_argument(
+        '--url_file',
+        type=str,
+        default=None,
+        help='Path to a text file containing URLs to scrape (one per line)'
+    )
+    
     return parser.parse_args()
+
+
+async def scrape_direct_urls(urls: List[str], headless: bool = True) -> int:
+    """
+    Directly scrape a list of specific building URLs.
+    
+    This allows re-scraping specific buildings without searching for them.
+    
+    Args:
+        urls: List of building URLs to scrape
+        headless: Run browser in headless mode
+    
+    Returns:
+        Number of units scraped
+    """
+    logger.info("="*80)
+    logger.info("DIRECT URL SCRAPING MODE")
+    logger.info("="*80)
+    logger.info(f"URLs to scrape: {len(urls)}")
+    logger.info(f"Headless mode: {headless}")
+    
+    all_units: List[UnitListing] = []
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=headless,
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-http2',
+            ]
+        )
+        
+        selected_user_agent = random.choice(USER_AGENTS)
+        logger.info(f"Using user agent: {selected_user_agent[:50]}...")
+        
+        context = await browser.new_context(
+            user_agent=selected_user_agent,
+            viewport={'width': 1920, 'height': 1080},
+            locale='en-US',
+            timezone_id='America/Chicago',
+            extra_http_headers={
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+            }
+        )
+        
+        page = await context.new_page()
+        
+        try:
+            for idx, url in enumerate(urls, 1):
+                logger.info(f"Processing URL {idx}/{len(urls)}: {url}")
+                try:
+                    units = await scrape_building(page, url)
+                    if units:
+                        all_units.extend(units)
+                        logger.info(f"  ✓ Got {len(units)} units")
+                    else:
+                        logger.warning(f"  ✗ No units found")
+                except Exception as e:
+                    logger.error(f"  ✗ Failed: {e}")
+                
+                # Delay between buildings
+                if idx < len(urls):
+                    delay = get_random_delay()
+                    logger.info(f"Waiting {delay:.1f}s before next URL...")
+                    await asyncio.sleep(delay)
+        finally:
+            await browser.close()
+    
+    # Save and process results
+    logger.info("Saving results...")
+    export_to_csv(all_units, OUTPUT_CSV_ALL)
+    
+    # Load existing and merge
+    existing_listings = load_existing_listings(PERSISTENT_CSV)
+    existing_ids = set(existing_listings.keys())
+    
+    filtered_units = geocode_and_filter_units(all_units, existing_ids)
+    export_to_csv(filtered_units, OUTPUT_CSV)
+    
+    merged_units = merge_and_dedupe_units(filtered_units, existing_listings)
+    export_combined_csv(merged_units, PERSISTENT_CSV)
+    
+    logger.info("="*80)
+    logger.info("DIRECT URL SCRAPING COMPLETE")
+    logger.info("="*80)
+    logger.info(f"URLs processed: {len(urls)}")
+    logger.info(f"Units scraped: {len(all_units)}")
+    logger.info(f"Units within radius: {len(filtered_units)}")
+    logger.info(f"Total accumulated: {len(merged_units)}")
+    logger.info(f"Combined data: {PERSISTENT_CSV}")
+    
+    return len(all_units)
 
 
 if __name__ == "__main__":
     args = parse_args()
     
-    if args.auto_restart:
+    if args.scrape_urls:
+        # Direct URL scraping mode
+        urls_to_scrape = []
+        
+        if args.url_file:
+            # Load URLs from file
+            try:
+                with open(args.url_file, 'r') as f:
+                    urls_to_scrape = [line.strip() for line in f if line.strip() and line.strip().startswith('http')]
+                logger.info(f"Loaded {len(urls_to_scrape)} URLs from {args.url_file}")
+            except Exception as e:
+                logger.error(f"Error loading URL file: {e}")
+                sys.exit(1)
+        else:
+            # Use the known scraped URLs list
+            urls_to_scrape = list(KNOWN_SCRAPED_URLS)
+            logger.info(f"Using {len(urls_to_scrape)} known URLs from KNOWN_SCRAPED_URLS")
+        
+        if not urls_to_scrape:
+            logger.error("No URLs to scrape. Use --url_file to specify a file with URLs.")
+            sys.exit(1)
+        
+        asyncio.run(scrape_direct_urls(
+            urls=urls_to_scrape,
+            headless=args.headless
+        ))
+    elif args.auto_restart:
         # Auto-restart mode
         asyncio.run(auto_restart_scraper(
             headless=args.headless,
