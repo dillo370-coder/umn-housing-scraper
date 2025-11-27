@@ -85,8 +85,14 @@ SEARCH_LOCATIONS = [
 ]
 
 # Rate limiting (increase if getting blocked)
-PAGE_DELAY_SECONDS = 5.0  # Increased from 4.0 for better bot avoidance
+PAGE_DELAY_SECONDS = 5.0  # Base delay, actual delay will be randomized
+PAGE_DELAY_VARIANCE = 3.0  # Random variance added to base delay (0 to this value)
 GEOCODE_DELAY_SECONDS = 1.5
+
+
+def get_random_delay() -> float:
+    """Get a randomized delay to avoid detection patterns."""
+    return PAGE_DELAY_SECONDS + random.uniform(0, PAGE_DELAY_VARIANCE)
 
 # User agents to rotate (helps avoid bot detection)
 USER_AGENTS = [
@@ -544,7 +550,7 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10) -> L
         for attempt in range(5):  # Increased retries
             try:
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
-                await asyncio.sleep(PAGE_DELAY_SECONDS)
+                await asyncio.sleep(get_random_delay())
                 # Wait for common result container
                 await page.wait_for_selector('article.placard, .placard', timeout=20000)
                 break
@@ -558,7 +564,7 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10) -> L
                     logger.info(f"HTTP/2 error detected. Waiting {wait_time}s before retry...")
                     await asyncio.sleep(wait_time)
                 elif attempt < 4:
-                    await asyncio.sleep(5 + attempt * 2)
+                    await asyncio.sleep(5 + attempt * 2 + random.uniform(0, 3))
                 else:
                     logger.error("Max retries reached. Try running with --headless=False to debug.")
                     logger.error("If issue persists, check your network connection or try later.")
@@ -588,7 +594,7 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10) -> L
                 try:
                     await next_button.first.click()
                     await page.wait_for_load_state("domcontentloaded", timeout=30000)
-                    await asyncio.sleep(PAGE_DELAY_SECONDS)
+                    await asyncio.sleep(get_random_delay())
                 except Exception as e:
                     logger.info(f"Pagination ended: {e}")
                     break
@@ -607,7 +613,7 @@ async def scrape_building(page: Page, url: str) -> List[UnitListing]:
     logger.info(f"Scraping building: {url}")
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await asyncio.sleep(PAGE_DELAY_SECONDS)
+        await asyncio.sleep(get_random_delay())
         building_data = await extract_building_info(page, url)
         all_units = await extract_units(page, building_data)
         sampled_units = sample_units(all_units)
@@ -929,8 +935,31 @@ def sample_units(units: List[UnitListing]) -> List[UnitListing]:
     return selected[:2]
 
 
-def geocode_and_filter_units(units: List[UnitListing]) -> List[UnitListing]:
+def geocode_and_filter_units(units: List[UnitListing], existing_ids: Set[str] = None) -> List[UnitListing]:
+    """
+    Geocode and filter units. Optionally skip units that already exist in a previous run.
+    
+    Args:
+        units: List of units to process
+        existing_ids: Set of listing_ids that already exist (to skip geocoding for duplicates)
+    
+    Returns:
+        List of filtered units within the search radius
+    """
     logger.info(f"Geocoding and filtering {len(units)} units")
+    
+    # First, filter out units that already exist to save geocoding time
+    if existing_ids:
+        original_count = len(units)
+        units = [u for u in units if u.listing_id not in existing_ids]
+        skipped = original_count - len(units)
+        if skipped > 0:
+            logger.info(f"Skipped {skipped} duplicate units before geocoding (already in combined data)")
+    
+    if not units:
+        logger.info("No new units to geocode")
+        return []
+    
     by_address: Dict[str, List[UnitListing]] = {}
     for unit in units:
         addr = unit.full_address or ""
@@ -1089,7 +1118,10 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
                     logger.error(f"Too many consecutive failures ({consecutive_failures}) - ending session")
                     break
 
-                await asyncio.sleep(PAGE_DELAY_SECONDS)
+                # Use randomized delay to avoid detection patterns
+                delay = get_random_delay()
+                logger.debug(f"Waiting {delay:.1f}s before next building...")
+                await asyncio.sleep(delay)
 
         finally:
             await browser.close()
@@ -1098,12 +1130,15 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
     logger.info("Saving unfiltered data...")
     export_to_csv(all_units, OUTPUT_CSV_ALL)
 
-    # Now filter and save filtered data
-    filtered_units = geocode_and_filter_units(all_units)
+    # Load existing listings to skip geocoding duplicates
+    existing_listings = load_existing_listings(PERSISTENT_CSV)
+    existing_ids = set(existing_listings.keys())
+    
+    # Now filter and save filtered data (skipping already-known duplicates before geocoding)
+    filtered_units = geocode_and_filter_units(all_units, existing_ids)
     export_to_csv(filtered_units, OUTPUT_CSV)
 
-    # Also update the combined/persistent CSV
-    existing_listings = load_existing_listings(PERSISTENT_CSV)
+    # Merge with existing data (don't reload - use what we already have)
     merged_units = merge_and_dedupe_units(filtered_units, existing_listings)
     export_combined_csv(merged_units, PERSISTENT_CSV)
 
@@ -1146,6 +1181,12 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     logger.info(f"Buildings per session: {max_buildings}")
     logger.info(f"Search locations: {len(SEARCH_LOCATIONS)} neighborhoods/areas")
     
+    # Randomize search locations to avoid always hitting same areas first
+    # This helps distribute scraping evenly and avoid bot detection patterns
+    shuffled_locations = list(SEARCH_LOCATIONS)
+    random.shuffle(shuffled_locations)
+    logger.info("Randomized search location order for better coverage")
+    
     total_scraped = 0
     session_num = 0
     location_index = 0
@@ -1154,8 +1195,8 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     while session_num < max_sessions:
         session_num += 1
         
-        # Rotate through different search locations
-        current_location = SEARCH_LOCATIONS[location_index % len(SEARCH_LOCATIONS)]
+        # Rotate through randomized search locations
+        current_location = shuffled_locations[location_index % len(shuffled_locations)]
         location_index += 1
         
         logger.info(f"\n{'='*80}")
