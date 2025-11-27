@@ -41,14 +41,16 @@ SEARCH_LOCATION = "Minneapolis, MN"
 
 # Neighborhoods and ZIP codes VERIFIED within 10km of UMN East Bank campus (44.9731, -93.2359)
 # All distances calculated from UMN campus center
+# EXPANDED list with more specific searches to find unique listings
 SEARCH_LOCATIONS = [
-    # Core areas (0-3km from UMN)
+    # Core areas (0-3km from UMN) - High priority
     "Dinkytown, Minneapolis, MN",           # ~0.5km - immediate campus area
     "Stadium Village, Minneapolis, MN",      # ~0.5km - immediate campus area
     "Marcy-Holmes, Minneapolis, MN",         # ~1km - just north of campus
     "Prospect Park, Minneapolis, MN",        # ~1.5km - east of campus
     "Cedar-Riverside, Minneapolis, MN",      # ~1.5km - west bank area
     "Southeast Como, Minneapolis, MN",       # ~2km - north of campus
+    "University, Minneapolis, MN",           # ~0km - campus searches
     
     # Near areas (3-6km from UMN)
     "Seward, Minneapolis, MN",               # ~3km - south
@@ -60,6 +62,9 @@ SEARCH_LOCATIONS = [
     "Loring Park, Minneapolis, MN",          # ~4km - west
     "North Loop, Minneapolis, MN",           # ~4km - northwest
     "Como, St Paul, MN",                     # ~4km - east (St Paul side)
+    "Mill District, Minneapolis, MN",        # ~3km - downtown area
+    "Gateway District, Minneapolis, MN",     # ~3km - downtown area
+    "Saint Anthony, MN",                     # ~3km - near NE Minneapolis
     
     # Moderate distance (6-10km from UMN)
     "Longfellow, Minneapolis, MN",           # ~5km - south
@@ -68,8 +73,12 @@ SEARCH_LOCATIONS = [
     "Uptown, Minneapolis, MN",               # ~6km - southwest (edge of radius)
     "Powderhorn, Minneapolis, MN",           # ~6km - south
     "Midway, St Paul, MN",                   # ~6km - east
+    "Corcoran, Minneapolis, MN",             # ~5km - south
+    "CARAG, Minneapolis, MN",                # ~6km - Calhoun area
+    "Lyndale, Minneapolis, MN",              # ~5km - south of downtown
+    "Stevens Square, Minneapolis, MN",       # ~4km - near Loring Park
     
-    # ZIP codes within 10km of UMN
+    # ZIP codes within 10km of UMN - for different search results
     "55414",  # Dinkytown/Stadium Village (~0.5km)
     "55455",  # UMN campus (0km)
     "55413",  # Northeast Minneapolis (~3km)
@@ -82,10 +91,26 @@ SEARCH_LOCATIONS = [
     "55104",  # St Paul Hamline-Midway (~6km)
     "55108",  # St Paul Como (~4km)
     "55407",  # Powderhorn (~6km)
+    "55411",  # Near North Minneapolis (~5km)
+    "55405",  # Bryn Mawr/Harrison (~5km)
+    
+    # Property type-specific searches (apartments.com supports these)
+    "condos for rent minneapolis mn",
+    "townhomes for rent minneapolis mn", 
+    "houses for rent minneapolis mn",
+    "cheap apartments minneapolis mn",
+    "luxury apartments minneapolis mn",
+    "studio apartments minneapolis mn",
+    "1 bedroom apartments minneapolis mn",
+    "2 bedroom apartments minneapolis mn",
+    "pet friendly apartments minneapolis mn",
 ]
 
-# Rate limiting (increase if getting blocked)
-PAGE_DELAY_SECONDS = 6.0  # Base delay, actual delay will be randomized (increased for bot avoidance)
+# Rate limiting settings
+# Normal mode: slower but safer
+PAGE_DELAY_SECONDS = 5.0  # Base delay (reduced from 6.0 for faster scraping)
+# Turbo mode: faster but higher risk of detection (set by --turbo flag)
+TURBO_PAGE_DELAY = 3.0  # Faster delays for turbo mode
 PAGE_DELAY_VARIANCE = 5.0  # Random variance added to base delay (0 to this value)
 GEOCODE_DELAY_SECONDS = 1.5
 
@@ -653,11 +678,32 @@ def parse_address(address_text: str) -> Dict[str, str]:
 # SCRAPING FUNCTIONS
 # ============================================================================
 
-async def search_apartments(page: Page, location: str, max_pages: int = 10) -> List[str]:
+async def search_apartments(page: Page, location: str, max_pages: int = 10, start_page: int = 1) -> List[str]:
+    """
+    Search for apartments at a location.
+    
+    Args:
+        page: Playwright page
+        location: Search location string
+        max_pages: Maximum number of search result pages to scrape
+        start_page: Page number to start from (1 = first page, 2 = skip to page 2, etc.)
+    
+    Returns:
+        List of building URLs found
+    """
     logger.info(f"Starting search for: {location}")
+    if start_page > 1:
+        logger.info(f"Skipping to page {start_page} (to find different buildings)")
     building_urls = set()
     try:
-        search_url = f"{BASE_URL}/{location.lower().replace(' ', '-').replace(',', '')}/"
+        # Build search URL - handle different location formats
+        location_slug = location.lower().replace(' ', '-').replace(',', '').replace("'", "")
+        search_url = f"{BASE_URL}/{location_slug}/"
+        
+        # If starting from a later page, add page number to URL
+        if start_page > 1:
+            search_url = f"{BASE_URL}/{location_slug}/{start_page}/"
+        
         logger.info(f"Navigating to: {search_url}")
 
         for attempt in range(5):  # Increased retries
@@ -683,7 +729,7 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10) -> L
                     logger.error("If issue persists, check your network connection or try later.")
                     raise
 
-        for page_num in range(1, max_pages + 1):
+        for page_num in range(start_page, start_page + max_pages):
             logger.info(f"Scraping search results page {page_num}")
             property_links = await page.locator('article.placard a.property-link, a.property-link').all()
             if not property_links:
@@ -1127,7 +1173,7 @@ def export_to_csv(units: List[UnitListing], filename: Path):
 
 
 async def main(headless: bool = True, max_search_pages: int = 25, max_buildings: int = None, 
-               skip_scraped: bool = False, search_location: str = None) -> int:
+               skip_scraped: bool = False, search_location: str = None, start_page: int = 1) -> int:
     """
     Main scraping function. Returns the number of units scraped in this session.
     
@@ -1137,6 +1183,7 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
         max_buildings: Max buildings to scrape (None = unlimited)
         skip_scraped: Skip buildings that were already scraped (for auto-restart mode)
         search_location: Location to search (defaults to SEARCH_LOCATION if not specified)
+        start_page: Search result page to start from (1 = first, 2+ = skip ahead to find different buildings)
     
     Returns:
         Number of units scraped in this session
@@ -1149,6 +1196,7 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
     logger.info(f"Search radius: {SEARCH_RADIUS_KM} km from UMN campus")
     logger.info(f"Headless mode: {headless}")
     logger.info(f"Max search pages: {max_search_pages}")
+    logger.info(f"Start page: {start_page}" + (" (skipping ahead)" if start_page > 1 else ""))
     logger.info(f"Max buildings: {max_buildings if max_buildings else 'unlimited'}")
     logger.info(f"Skip already scraped: {skip_scraped}")
     logger.info(f"Output file: {OUTPUT_CSV}")
@@ -1195,7 +1243,7 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
         page = await context.new_page()
 
         try:
-            building_urls = await search_apartments(page, location, max_search_pages)
+            building_urls = await search_apartments(page, location, max_search_pages, start_page)
 
             # Filter out already-scraped URLs
             if skip_scraped and scraped_urls:
@@ -1277,12 +1325,16 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
 
 async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10, 
                                 max_buildings: int = 50, max_sessions: int = 5,
-                                session_cooldown: int = 300, target_listings: int = 1000):
+                                session_cooldown: int = 300, target_listings: int = 1000,
+                                start_page: int = 1, turbo: bool = False):
     """
     Automatically run multiple scraping sessions with cooldowns between them.
     
     Uses balanced location ordering to ensure no location is scraped more than
     twice before all others have been scraped twice.
+    
+    For finding more unique listings, sessions will alternate between different
+    starting pages (1, 2, 3...) to discover buildings that appear on later pages.
     
     Args:
         headless: Run browser in headless mode
@@ -1291,7 +1343,15 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
         max_sessions: Maximum number of sessions to run
         session_cooldown: Seconds to wait between sessions (default 5 minutes)
         target_listings: Stop when this many total listings are collected
+        start_page: Initial page to start from (will rotate 1, 2, 3...)
+        turbo: Use faster delays (higher risk of detection but more data)
     """
+    # If turbo mode, use faster delays
+    global PAGE_DELAY_SECONDS
+    if turbo:
+        PAGE_DELAY_SECONDS = TURBO_PAGE_DELAY
+        logger.info("🚀 TURBO MODE ENABLED - Using faster delays")
+    
     logger.info("="*80)
     logger.info("AUTO-RESTART MODE ENABLED")
     logger.info("="*80)
@@ -1300,6 +1360,9 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     logger.info(f"Target listings: {target_listings}")
     logger.info(f"Buildings per session: {max_buildings}")
     logger.info(f"Search locations: {len(SEARCH_LOCATIONS)} neighborhoods/areas")
+    logger.info(f"Starting from page: {start_page} (will rotate through pages 1-5)")
+    if turbo:
+        logger.info(f"⚡ TURBO: Using {PAGE_DELAY_SECONDS}s delays instead of normal 5s")
     
     # Load location scrape counts for balanced coverage
     location_counts = load_location_counts(LOCATION_COUNTER_FILE)
@@ -1308,6 +1371,7 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     total_scraped = 0
     session_num = 0
     zero_sessions_in_a_row = 0
+    current_start_page = start_page  # Will rotate through 1, 2, 3, 4, 5
     
     while session_num < max_sessions:
         session_num += 1
@@ -1322,6 +1386,7 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
         logger.info(f"\n{'='*80}")
         logger.info(f"STARTING SESSION {session_num}/{max_sessions}")
         logger.info(f"Searching: {current_location} (scraped {current_count} times before)")
+        logger.info(f"Starting from page: {current_start_page}")
         logger.info(f"{'='*80}\n")
         
         try:
@@ -1331,13 +1396,18 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
                 max_search_pages=max_search_pages,
                 max_buildings=max_buildings,
                 skip_scraped=True,
-                search_location=current_location
+                search_location=current_location,
+                start_page=current_start_page
             )
             total_scraped += units_scraped
             
             # Update and save location count
             location_counts[current_location] = location_counts.get(current_location, 0) + 1
             save_location_counts(LOCATION_COUNTER_FILE, location_counts)
+            
+            # Rotate start page for next session (1 -> 2 -> 3 -> 4 -> 5 -> 1...)
+            # This helps find buildings that appear on different pages
+            current_start_page = (current_start_page % 5) + 1
             
             # Check if we've reached target
             existing = load_existing_listings(PERSISTENT_CSV)
@@ -1450,6 +1520,12 @@ Examples:
         default=None,
         help='Maximum number of buildings to scrape per session. Default: unlimited'
     )
+    parser.add_argument(
+        '--start_page',
+        type=int,
+        default=1,
+        help='Search result page to start from (1=first, 2=skip to page 2, etc.). Useful for finding different buildings. Default: 1'
+    )
     
     # Auto-restart mode arguments
     parser.add_argument(
@@ -1474,6 +1550,11 @@ Examples:
         type=int,
         default=1000,
         help='Stop auto-restart when this many listings are collected. Default: 1000'
+    )
+    parser.add_argument(
+        '--turbo',
+        action='store_true',
+        help='🚀 TURBO MODE: Use faster delays for quicker scraping (higher risk of detection). Good when you need data fast.'
     )
     
     # Direct URL scraping mode
@@ -1598,6 +1679,11 @@ async def scrape_direct_urls(urls: List[str], headless: bool = True) -> int:
 if __name__ == "__main__":
     args = parse_args()
     
+    # Apply turbo mode if requested (affects global delay settings)
+    if args.turbo:
+        PAGE_DELAY_SECONDS = TURBO_PAGE_DELAY
+        logger.info("🚀 TURBO MODE ENABLED - Using faster delays for quicker scraping")
+    
     if args.scrape_urls:
         # Direct URL scraping mode
         urls_to_scrape = []
@@ -1629,15 +1715,18 @@ if __name__ == "__main__":
         asyncio.run(auto_restart_scraper(
             headless=args.headless,
             max_search_pages=args.max_search_pages,
-            max_buildings=args.max_buildings or 50,  # Default to 50 per session in auto mode
+            max_buildings=args.max_buildings or 100,  # Increased from 50 to 100 per session
             max_sessions=args.max_sessions,
             session_cooldown=args.session_cooldown,
-            target_listings=args.target_listings
+            target_listings=args.target_listings,
+            start_page=args.start_page,
+            turbo=args.turbo
         ))
     else:
         # Single session mode
         asyncio.run(main(
             headless=args.headless,
             max_search_pages=args.max_search_pages,
-            max_buildings=args.max_buildings
+            max_buildings=args.max_buildings,
+            start_page=args.start_page
         ))
