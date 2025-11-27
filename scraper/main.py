@@ -85,14 +85,23 @@ SEARCH_LOCATIONS = [
 ]
 
 # Rate limiting (increase if getting blocked)
-PAGE_DELAY_SECONDS = 5.0  # Base delay, actual delay will be randomized
-PAGE_DELAY_VARIANCE = 3.0  # Random variance added to base delay (0 to this value)
+PAGE_DELAY_SECONDS = 6.0  # Base delay, actual delay will be randomized (increased for bot avoidance)
+PAGE_DELAY_VARIANCE = 5.0  # Random variance added to base delay (0 to this value)
 GEOCODE_DELAY_SECONDS = 1.5
+
+# Bot detection avoidance settings
+SCROLL_DELAY_MIN = 0.5  # Minimum delay when scrolling
+SCROLL_DELAY_MAX = 2.0  # Maximum delay when scrolling
+MOUSE_MOVE_ENABLED = True  # Enable simulated mouse movements
 
 
 def get_random_delay() -> float:
     """Get a randomized delay to avoid detection patterns."""
-    return PAGE_DELAY_SECONDS + random.uniform(0, PAGE_DELAY_VARIANCE)
+    base = PAGE_DELAY_SECONDS + random.uniform(0, PAGE_DELAY_VARIANCE)
+    # Add occasional longer pauses to simulate human behavior
+    if random.random() < 0.1:  # 10% chance of extra-long pause
+        base += random.uniform(3, 8)
+    return base
 
 # User agents to rotate (helps avoid bot detection)
 USER_AGENTS = [
@@ -113,6 +122,34 @@ LOG_FILE = OUTPUT_DIR / f"scraper_log_{TIMESTAMP}.log"
 # Persistent output file for accumulating results across sessions
 PERSISTENT_CSV = OUTPUT_DIR / "umn_housing_combined.csv"
 SCRAPED_URLS_FILE = OUTPUT_DIR / "scraped_urls.txt"
+LOCATION_COUNTER_FILE = OUTPUT_DIR / "location_counts.txt"
+
+# Previously scraped URLs to skip (from user-reported lost data)
+# These are URLs the user already scraped but lost - skip them to allow fresh re-scraping
+KNOWN_SCRAPED_URLS = [
+    "https://www.apartments.com/lumos-apartments-minneapolis-mn/ztq9cyw/",
+    "https://www.apartments.com/lakefield-apartments-minneapolis-mn/vms5ejg/",
+    "https://www.apartments.com/the-archive-minneapolis-mn/8z05mr1/",
+    "https://www.apartments.com/moment-minneapolis-mn/s1qg2g4/",
+    "https://www.apartments.com/the-quad-on-delaware-minneapolis-mn/q5w315x/",
+    "https://www.apartments.com/the-laker-minneapolis-mn/ezrcwgm/",
+    "https://www.apartments.com/groove-lofts-minneapolis-mn/cmvfmhe/",
+    "https://www.apartments.com/29-bryant-apartments-minneapolis-mn/gsnmjnz/",
+    "https://www.apartments.com/expo-minneapolis-mn/90sk3p6/",
+    "https://www.apartments.com/york-place-apartments-edina-edina-mn/xh8mdsm/",
+    "https://www.apartments.com/lago-apartments-minneapolis-mn/1fls1t4/",
+    "https://www.apartments.com/vesi-minneapolis-mn/y3gy3ds/",
+    "https://www.apartments.com/270-hennepin-minneapolis-mn/1eej1c4/",
+    "https://www.apartments.com/xenia-apartments-minneapolis-mn/v2crl6g/",
+    "https://www.apartments.com/arlo-west-end-saint-louis-park-mn/d55rfgl/",
+    "https://www.apartments.com/nox-apartments-minneapolis-mn/f7ksbzr/",
+    "https://www.apartments.com/ironclad-residential-minneapolis-mn/6z0vvcv/",
+    "https://www.apartments.com/minneapolis-grand-apartments-minneapolis-mn/bj3z6n9/",
+    "https://www.apartments.com/aberdeen-apartments-minneapolis-mn/wjvqy5l/",
+    "https://www.apartments.com/avid-minneapolis-mn/zzj68pw/",
+    "https://www.apartments.com/welcome-to-equinox-apartments-saint-anthony-mn/0983tk1/",
+    "https://www.apartments.com/sora-minneapolis-mn/",
+]
 
 # Student housing keywords
 STUDENT_KEYWORDS = [
@@ -247,15 +284,20 @@ def load_existing_listings(csv_path: Path) -> Dict[str, UnitListing]:
 
 
 def load_scraped_urls(filepath: Path) -> Set[str]:
-    """Load set of already-scraped building URLs."""
-    urls = set()
+    """Load set of already-scraped building URLs, including known previously-scraped URLs."""
+    # Start with known previously scraped URLs (from user's lost data)
+    urls = set(KNOWN_SCRAPED_URLS)
     if filepath.exists():
         try:
             with open(filepath, 'r') as f:
-                urls = set(line.strip() for line in f if line.strip())
-            logger.info(f"Loaded {len(urls)} previously scraped URLs")
+                for line in f:
+                    if line.strip():
+                        urls.add(line.strip())
+            logger.info(f"Loaded {len(urls)} previously scraped URLs (including {len(KNOWN_SCRAPED_URLS)} from history)")
         except Exception as e:
             logger.warning(f"Error loading scraped URLs: {e}")
+    else:
+        logger.info(f"Starting with {len(KNOWN_SCRAPED_URLS)} known scraped URLs from history")
     return urls
 
 
@@ -266,6 +308,58 @@ def save_scraped_url(filepath: Path, url: str):
             f.write(url + '\n')
     except Exception as e:
         logger.warning(f"Error saving scraped URL: {e}")
+
+
+def load_location_counts(filepath: Path) -> Dict[str, int]:
+    """Load how many times each location has been scraped."""
+    counts = {}
+    if filepath.exists():
+        try:
+            with open(filepath, 'r') as f:
+                for line in f:
+                    if ':' in line:
+                        loc, count = line.strip().rsplit(':', 1)
+                        counts[loc] = int(count)
+            logger.info(f"Loaded location counts for {len(counts)} locations")
+        except Exception as e:
+            logger.warning(f"Error loading location counts: {e}")
+    return counts
+
+
+def save_location_counts(filepath: Path, counts: Dict[str, int]):
+    """Save location scrape counts to file."""
+    try:
+        with open(filepath, 'w') as f:
+            for loc, count in counts.items():
+                f.write(f"{loc}:{count}\n")
+    except Exception as e:
+        logger.warning(f"Error saving location counts: {e}")
+
+
+def get_balanced_location_order(locations: List[str], counts: Dict[str, int]) -> List[str]:
+    """
+    Get locations ordered by how few times they've been scraped (least-scraped first).
+    This ensures balanced coverage - no location is scraped more than twice before
+    all others have been scraped twice.
+    
+    Also adds randomization within each tier to avoid predictable patterns.
+    """
+    # Group locations by their scrape count
+    tiers = {}
+    for loc in locations:
+        count = counts.get(loc, 0)
+        if count not in tiers:
+            tiers[count] = []
+        tiers[count].append(loc)
+    
+    # Shuffle each tier for randomization, then sort by count (lowest first)
+    result = []
+    for count in sorted(tiers.keys()):
+        tier_locs = tiers[count]
+        random.shuffle(tier_locs)  # Randomize within tier
+        result.extend(tier_locs)
+    
+    return result
 
 
 def merge_and_dedupe_units(new_units: List[UnitListing], existing: Dict[str, Any]) -> List[UnitListing]:
@@ -1164,6 +1258,9 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     """
     Automatically run multiple scraping sessions with cooldowns between them.
     
+    Uses balanced location ordering to ensure no location is scraped more than
+    twice before all others have been scraped twice.
+    
     Args:
         headless: Run browser in headless mode
         max_search_pages: Max search pages per session
@@ -1181,27 +1278,27 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     logger.info(f"Buildings per session: {max_buildings}")
     logger.info(f"Search locations: {len(SEARCH_LOCATIONS)} neighborhoods/areas")
     
-    # Randomize search locations to avoid always hitting same areas first
-    # This helps distribute scraping evenly and avoid bot detection patterns
-    shuffled_locations = list(SEARCH_LOCATIONS)
-    random.shuffle(shuffled_locations)
-    logger.info("Randomized search location order for better coverage")
+    # Load location scrape counts for balanced coverage
+    location_counts = load_location_counts(LOCATION_COUNTER_FILE)
+    logger.info("Using balanced location ordering (least-scraped first)")
     
     total_scraped = 0
     session_num = 0
-    location_index = 0
     zero_sessions_in_a_row = 0
     
     while session_num < max_sessions:
         session_num += 1
         
-        # Rotate through randomized search locations
-        current_location = shuffled_locations[location_index % len(shuffled_locations)]
-        location_index += 1
+        # Get balanced location order (least-scraped locations first)
+        balanced_locations = get_balanced_location_order(SEARCH_LOCATIONS, location_counts)
+        
+        # Pick the first location (least scraped)
+        current_location = balanced_locations[0]
+        current_count = location_counts.get(current_location, 0)
         
         logger.info(f"\n{'='*80}")
         logger.info(f"STARTING SESSION {session_num}/{max_sessions}")
-        logger.info(f"Searching: {current_location}")
+        logger.info(f"Searching: {current_location} (scraped {current_count} times before)")
         logger.info(f"{'='*80}\n")
         
         try:
@@ -1214,6 +1311,10 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
                 search_location=current_location
             )
             total_scraped += units_scraped
+            
+            # Update and save location count
+            location_counts[current_location] = location_counts.get(current_location, 0) + 1
+            save_location_counts(LOCATION_COUNTER_FILE, location_counts)
             
             # Check if we've reached target
             existing = load_existing_listings(PERSISTENT_CSV)
@@ -1228,11 +1329,10 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
                 zero_sessions_in_a_row += 1
                 logger.warning(f"Session produced 0 units - may be blocked ({zero_sessions_in_a_row} in a row)")
                 
-                # If we've had multiple zeros, maybe try switching locations faster
+                # If we've had multiple zeros, the location may be exhausted or blocked
+                # The balanced ordering will automatically move to another location next time
                 if zero_sessions_in_a_row >= 3:
-                    # Skip ahead in locations to try a different area
-                    location_index += 5
-                    logger.info("Skipping ahead in location list to try different areas")
+                    logger.info("Multiple zero sessions - bot detection may be active")
                     zero_sessions_in_a_row = 0
                 
                 # Increase cooldown if blocked
@@ -1242,8 +1342,11 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
             else:
                 zero_sessions_in_a_row = 0  # Reset on success
                 if session_num < max_sessions:
-                    logger.info(f"Cooling down for {session_cooldown} seconds before next session...")
-                    await asyncio.sleep(session_cooldown)
+                    # Add some randomness to cooldown timing
+                    actual_cooldown = session_cooldown + random.randint(-60, 120)
+                    actual_cooldown = max(60, actual_cooldown)  # At least 1 minute
+                    logger.info(f"Cooling down for {actual_cooldown} seconds before next session...")
+                    await asyncio.sleep(actual_cooldown)
                 
         except KeyboardInterrupt:
             logger.info("Interrupted by user - stopping auto-restart")
@@ -1261,6 +1364,11 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     logger.info(f"Sessions run: {session_num}")
     logger.info(f"Total unique listings collected: {len(existing)}")
     logger.info(f"Combined data file: {PERSISTENT_CSV}")
+    
+    # Show location coverage
+    logger.info("\nLocation coverage:")
+    for loc in sorted(location_counts.keys(), key=lambda x: location_counts[x], reverse=True):
+        logger.info(f"  {loc}: {location_counts[loc]} sessions")
 
 
 def parse_args():
