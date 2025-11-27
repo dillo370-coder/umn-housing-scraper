@@ -126,6 +126,7 @@ LOCATION_COUNTER_FILE = OUTPUT_DIR / "location_counts.txt"
 
 # Previously scraped URLs to skip (from user-reported lost data)
 # These are URLs the user already scraped but lost - skip them to allow fresh re-scraping
+# NOTE: Only include URLs within 10km of UMN campus. Removed: Edina, St. Louis Park (too far)
 KNOWN_SCRAPED_URLS = [
     "https://www.apartments.com/lumos-apartments-minneapolis-mn/ztq9cyw/",
     "https://www.apartments.com/lakefield-apartments-minneapolis-mn/vms5ejg/",
@@ -136,12 +137,12 @@ KNOWN_SCRAPED_URLS = [
     "https://www.apartments.com/groove-lofts-minneapolis-mn/cmvfmhe/",
     "https://www.apartments.com/29-bryant-apartments-minneapolis-mn/gsnmjnz/",
     "https://www.apartments.com/expo-minneapolis-mn/90sk3p6/",
-    "https://www.apartments.com/york-place-apartments-edina-edina-mn/xh8mdsm/",
+    # Removed: york-place-apartments-edina - Edina is ~12km from UMN, outside 10km radius
     "https://www.apartments.com/lago-apartments-minneapolis-mn/1fls1t4/",
     "https://www.apartments.com/vesi-minneapolis-mn/y3gy3ds/",
     "https://www.apartments.com/270-hennepin-minneapolis-mn/1eej1c4/",
     "https://www.apartments.com/xenia-apartments-minneapolis-mn/v2crl6g/",
-    "https://www.apartments.com/arlo-west-end-saint-louis-park-mn/d55rfgl/",
+    # Removed: arlo-west-end-saint-louis-park - St. Louis Park is ~13km from UMN, outside 10km radius
     "https://www.apartments.com/nox-apartments-minneapolis-mn/f7ksbzr/",
     "https://www.apartments.com/ironclad-residential-minneapolis-mn/6z0vvcv/",
     "https://www.apartments.com/minneapolis-grand-apartments-minneapolis-mn/bj3z6n9/",
@@ -241,9 +242,15 @@ class UnitListing:
 # PERSISTENCE AND DEDUPLICATION
 # ============================================================================
 
-def load_existing_listings(csv_path: Path) -> Dict[str, UnitListing]:
-    """Load existing listings from CSV file into a dict keyed by listing_id."""
+def load_existing_listings(csv_path: Path, filter_by_distance: bool = True) -> Dict[str, UnitListing]:
+    """Load existing listings from CSV file into a dict keyed by listing_id.
+    
+    Args:
+        csv_path: Path to the CSV file
+        filter_by_distance: If True, exclude listings beyond SEARCH_RADIUS_KM from UMN (default True)
+    """
     existing = {}
+    excluded_count = 0
     if csv_path.exists():
         try:
             with open(csv_path, 'r', newline='', encoding='utf-8') as f:
@@ -276,7 +283,19 @@ def load_existing_listings(csv_path: Path) -> Dict[str, UnitListing]:
                                     row[key] = False
                                 else:
                                     row[key] = None
+                        
+                        # Filter by distance if requested (enforce 10km radius)
+                        if filter_by_distance:
+                            dist = row.get('dist_to_campus_km')
+                            if dist is not None and dist > SEARCH_RADIUS_KM:
+                                building = row.get('building_name', 'Unknown')
+                                logger.debug(f"Excluding {building}: {dist:.1f}km from UMN (>{SEARCH_RADIUS_KM}km)")
+                                excluded_count += 1
+                                continue
+                        
                         existing[listing_id] = row
+            if excluded_count > 0:
+                logger.info(f"Excluded {excluded_count} listings beyond {SEARCH_RADIUS_KM}km radius")
             logger.info(f"Loaded {len(existing)} existing listings from {csv_path}")
         except Exception as e:
             logger.warning(f"Error loading existing listings: {e}")
@@ -1074,6 +1093,7 @@ def geocode_and_filter_units(units: List[UnitListing], existing_ids: Set[str] = 
                     unit.lat = coords['lat']
                     unit.lon = coords['lon']
     filtered: List[UnitListing] = []
+    excluded_too_far = 0
     for unit in units:
         if unit.lat is not None and unit.lon is not None:
             dist = haversine_distance(unit.lat, unit.lon, UMN_CAMPUS_LAT, UMN_CAMPUS_LON)
@@ -1081,11 +1101,14 @@ def geocode_and_filter_units(units: List[UnitListing], existing_ids: Set[str] = 
             logger.info(f"{unit.building_name}: {dist:.2f} km from UMN")
             if dist <= SEARCH_RADIUS_KM:
                 filtered.append(unit)
-                logger.info("  ✓ INCLUDED")
+                logger.info("  ✓ INCLUDED (within 10km)")
             else:
-                logger.info("  ✗ Excluded")
+                excluded_too_far += 1
+                logger.info(f"  ✗ EXCLUDED (>{SEARCH_RADIUS_KM}km from UMN - too far)")
         else:
             logger.warning(f"Could not geocode: {unit.full_address}")
+    if excluded_too_far > 0:
+        logger.info(f"Excluded {excluded_too_far} units for being >{SEARCH_RADIUS_KM}km from UMN")
     logger.info(f"Filtered to {len(filtered)} units within {SEARCH_RADIUS_KM} km of UMN")
     return filtered
 
