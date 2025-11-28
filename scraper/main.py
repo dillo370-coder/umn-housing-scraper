@@ -41,12 +41,12 @@ SEARCH_LOCATION = "Minneapolis, MN"
 
 # Neighborhoods and ZIP codes VERIFIED within 10km of UMN East Bank campus (44.9731, -93.2359)
 # All distances calculated from UMN campus center
-# GREATLY EXPANDED list with filter URLs to find MORE unique listings
-# Using apartments.com's URL filter parameters for price ranges, bedrooms, etc.
+# OPTIMIZED for finding MORE unique listings without over-complicated filters
 
 # Base neighborhood searches - these become URLs like /dinkytown-minneapolis-mn/
+# PRIORITIZED by proximity to UMN campus (closest first)
 BASE_NEIGHBORHOODS = [
-    # Core areas (0-3km from UMN) - Highest priority
+    # Core areas (0-3km from UMN) - Highest priority - MUST search thoroughly
     "dinkytown-minneapolis-mn",
     "stadium-village-minneapolis-mn",
     "marcy-holmes-minneapolis-mn", 
@@ -82,28 +82,7 @@ BASE_NEIGHBORHOODS = [
     "stevens-square-minneapolis-mn",
 ]
 
-# Price range filter suffixes for apartments.com URLs
-# These help find different listings by price segment
-PRICE_FILTERS = [
-    "",  # No filter - all prices
-    "min-500-max-1000/",       # Budget: $500-$1000
-    "min-1000-max-1500/",      # Mid-low: $1000-$1500
-    "min-1500-max-2000/",      # Mid: $1500-$2000
-    "min-2000-max-2500/",      # Mid-high: $2000-$2500
-    "min-2500/",               # Luxury: $2500+
-    "max-1200/",               # Affordable: under $1200
-]
-
-# Bedroom filters
-BEDROOM_FILTERS = [
-    "",  # All bedrooms
-    "studios/",           # Studios only
-    "1-bedrooms/",        # 1 BR only
-    "2-bedrooms/",        # 2 BR only
-    "3-bedrooms/",        # 3 BR only
-]
-
-# Property type variations (different URL patterns)
+# Property type variations (different URL patterns) - apartment.com format
 PROPERTY_TYPE_SEARCHES = [
     "apartments",        # Standard apartments
     "condos",            # Condos for rent
@@ -129,41 +108,35 @@ ZIP_CODES = [
 
 def generate_search_urls() -> List[str]:
     """
-    Generate a comprehensive list of search URLs using apartments.com's filter system.
-    This creates many different search variations to find unique listings.
+    Generate a focused list of search URLs that actually work on apartments.com.
+    
+    KEY INSIGHT: Rather than complex filter URLs that may break, we focus on:
+    1. All neighborhoods (most effective - each one shows different buildings)
+    2. ZIP codes (good for finding different buildings)
+    3. Property type searches for Minneapolis (condos, townhomes, houses)
+    4. Special category searches (pet-friendly, student housing, etc.)
+    
+    Each of these simple searches tends to return different building sets.
+    The key is to search MANY different locations, not the same location with filters.
     """
     urls = []
     
-    # 1. Neighborhood + price filter combinations (highest priority)
-    for neighborhood in BASE_NEIGHBORHOODS[:15]:  # Top 15 closest neighborhoods
-        for price_filter in PRICE_FILTERS:
-            if price_filter:
-                urls.append(f"{neighborhood}/{price_filter}")
-            else:
-                urls.append(neighborhood)
+    # 1. ALL base neighborhoods (no filters - these work best)
+    # Apartments.com shows different results per neighborhood
+    # This is the most effective strategy - 30 neighborhoods = 30 different result sets
+    for neighborhood in BASE_NEIGHBORHOODS:
+        urls.append(neighborhood)
     
-    # 2. Neighborhood + bedroom filter combinations
-    for neighborhood in BASE_NEIGHBORHOODS[:10]:  # Top 10 closest
-        for bed_filter in BEDROOM_FILTERS:
-            if bed_filter:
-                urls.append(f"{neighborhood}/{bed_filter}")
-    
-    # 3. ZIP code searches with filters
+    # 2. ZIP code searches (each ZIP returns different buildings)
     for zip_code in ZIP_CODES:
         urls.append(zip_code)
-        for price_filter in PRICE_FILTERS[:4]:  # First 4 price ranges
-            if price_filter:
-                urls.append(f"{zip_code}/{price_filter}")
     
-    # 4. Property type searches for Minneapolis
+    # 3. Property type searches for Minneapolis area
+    # These show different buildings than regular apartment searches
     for prop_type in PROPERTY_TYPE_SEARCHES:
         urls.append(f"{prop_type}-for-rent/minneapolis-mn")
-        # Also with price filters
-        for price_filter in PRICE_FILTERS[:3]:
-            if price_filter:
-                urls.append(f"{prop_type}-for-rent/minneapolis-mn/{price_filter}")
     
-    # 5. Special filter combinations
+    # 4. Special category searches (each category surfaces different buildings)
     special_searches = [
         "pet-friendly-apartments/minneapolis-mn",
         "furnished-apartments/minneapolis-mn",
@@ -171,6 +144,11 @@ def generate_search_urls() -> List[str]:
         "cheap-apartments/minneapolis-mn",
         "student-housing/minneapolis-mn",
         "short-term-apartments/minneapolis-mn",
+        # St Paul searches  
+        "apartments/saint-paul-mn",
+        "pet-friendly-apartments/saint-paul-mn",
+        # Additional city-wide search variations
+        "minneapolis-mn",  # Full city search
     ]
     urls.extend(special_searches)
     
@@ -1456,8 +1434,8 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
 
 
 async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10, 
-                                max_buildings: int = 50, max_sessions: int = 5,
-                                session_cooldown: int = 300, target_listings: int = 1000,
+                                max_buildings: int = 100, max_sessions: int = 50,
+                                session_cooldown: int = 600, target_listings: int = 1000,
                                 start_page: int = 1, turbo: bool = False,
                                 deep_scrape: bool = False):
     """
@@ -1466,19 +1444,22 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     Uses balanced location ordering to ensure no location is scraped more than
     twice before all others have been scraped twice.
     
-    For finding more unique listings, sessions will alternate between different
-    starting pages (1, 2, 3...) to discover buildings that appear on later pages.
+    STRATEGY FOR FINDING UNIQUE LISTINGS:
+    - Search many DIFFERENT locations (neighborhoods, ZIP codes, property types)
+    - Each location search returns different buildings
+    - Always start from page 1 and search multiple pages per location
+    - Skip already-scraped buildings to save time
     
     Args:
         headless: Run browser in headless mode
-        max_search_pages: Max search pages per session
-        max_buildings: Max buildings per session
-        max_sessions: Maximum number of sessions to run
-        session_cooldown: Seconds to wait between sessions (default 5 minutes)
+        max_search_pages: Max search pages per session (default 10)
+        max_buildings: Max buildings per session (default 100)
+        max_sessions: Maximum number of sessions to run (default 50)
+        session_cooldown: Seconds to wait between sessions (default 600 = 10 minutes)
         target_listings: Stop when this many total listings are collected
-        start_page: Initial page to start from (will rotate 1, 2, 3...)
+        start_page: Not used - always starts from page 1
         turbo: Use faster delays (higher risk of detection but more data)
-        deep_scrape: Try multiple filter combinations per session for more unique listings
+        deep_scrape: Not used - focus is on different locations instead
     """
     # If turbo mode, use faster delays
     global PAGE_DELAY_SECONDS
@@ -1493,9 +1474,8 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     logger.info(f"Cooldown between sessions: {session_cooldown} seconds")
     logger.info(f"Target listings: {target_listings}")
     logger.info(f"Buildings per session: {max_buildings}")
-    logger.info(f"Search locations: {len(SEARCH_LOCATIONS)} filter combinations")
-    logger.info(f"Starting from page: {start_page} (will rotate through pages 1-5)")
-    logger.info(f"Deep scrape mode: {deep_scrape} (multiple filters per session)")
+    logger.info(f"Search locations: {len(SEARCH_LOCATIONS)} different searches")
+    logger.info(f"Strategy: Search ALL pages from page 1 for each location")
     if turbo:
         logger.info(f"⚡ TURBO: Using {PAGE_DELAY_SECONDS}s delays instead of normal 5s")
     
@@ -1506,7 +1486,6 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     total_scraped = 0
     session_num = 0
     zero_sessions_in_a_row = 0
-    current_start_page = start_page  # Will rotate through 1, 2, 3, 4, 5
     
     while session_num < max_sessions:
         session_num += 1
@@ -1521,28 +1500,26 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
         logger.info(f"\n{'='*80}")
         logger.info(f"STARTING SESSION {session_num}/{max_sessions}")
         logger.info(f"Searching: {current_location} (scraped {current_count} times before)")
-        logger.info(f"Starting from page: {current_start_page}")
+        logger.info(f"Will scrape up to {max_search_pages} pages starting from page 1")
         logger.info(f"{'='*80}\n")
         
         try:
-            # Run a session, skipping already-scraped buildings
+            # ALWAYS start from page 1 to get ALL buildings in each location
+            # The key to finding unique listings is searching DIFFERENT locations,
+            # not skipping to later pages of the same location
             units_scraped = await main(
                 headless=headless,
                 max_search_pages=max_search_pages,
                 max_buildings=max_buildings,
                 skip_scraped=True,
                 search_location=current_location,
-                start_page=current_start_page
+                start_page=1  # Always start from page 1
             )
             total_scraped += units_scraped
             
             # Update and save location count
             location_counts[current_location] = location_counts.get(current_location, 0) + 1
             save_location_counts(LOCATION_COUNTER_FILE, location_counts)
-            
-            # Rotate start page for next session (1 -> 2 -> 3 -> 4 -> 5 -> 1...)
-            # This helps find buildings that appear on different pages
-            current_start_page = (current_start_page % 5) + 1
             
             # Check if we've reached target
             existing = load_existing_listings(PERSISTENT_CSV)
