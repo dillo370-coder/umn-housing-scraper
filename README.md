@@ -1,10 +1,15 @@
 # UMN Housing Scraper
 
-Playwright-based web scraper that extracts apartment listings from Apartments.com around the University of Minnesota – Twin Cities campus for housing economics research.
+Playwright-based web scrapers that extract apartment listings from multiple sources around the University of Minnesota – Twin Cities campus for housing economics research.
 
 ## Overview
 
-This scraper collects address-level apartment listing data for hedonic housing analysis, focusing on properties within 10 km of the UMN East Bank campus (44.9731, -93.2359). It handles special cases like student housing pricing (per-bed, shared bedrooms) and captures building-level amenity data.
+This project includes two scrapers:
+
+1. **Apartments.com Scraper** (`scraper/main.py`) - Scrapes the commercial apartments.com website
+2. **UMN Listings Scraper** (`scraper/umn_listings.py`) - Scrapes the official UMN Off-Campus Marketplace (listings.umn.edu)
+
+Both scrapers collect address-level apartment listing data for hedonic housing analysis, focusing on properties within 10 km of the UMN East Bank campus (44.9731, -93.2359). They handle special cases like student housing pricing (per-bed, shared bedrooms) and capture building-level amenity data.
 
 ## Features
 
@@ -15,6 +20,7 @@ This scraper collects address-level apartment listing data for hedonic housing a
 - Filters results by distance to UMN campus (10 km radius)
 - Exports R-friendly CSV with lowercase_snake_case columns
 - **Auto-restart mode**: Automatically runs multiple sessions with cooldowns, deduplicates results, and accumulates listings until target reached
+- **UMN Listings support**: Scrape the official UMN student housing marketplace
 
 ## Quick Start
 
@@ -39,6 +45,29 @@ python3 -m scraper.main --headless=False --max_search_pages=1 --max_buildings=2
 ```bash
 python3 -m scraper.main --headless=True --max_search_pages=50 --max_buildings=800
 ```
+
+## UMN Listings Scraper (listings.umn.edu)
+
+The UMN Listings scraper collects listings from the official University of Minnesota Off-Campus Housing Marketplace. This is a separate data source with student-focused listings.
+
+### Run UMN Listings Scraper
+
+```bash
+# Test run (visible browser)
+python3 -m scraper.umn_listings --headless=False
+
+# Full headless run
+python3 -m scraper.umn_listings --headless=True
+
+# Limit number of listings
+python3 -m scraper.umn_listings --headless=False --max_listings=10
+```
+
+### UMN Listings Output
+
+- `output/umn_listings_data_{timestamp}.csv` - Session data
+- `output/umn_listings_combined.csv` - All unique listings accumulated
+- `output/umn_listings_log_{timestamp}.log` - Log file
 
 ### 4. Auto-Restart Mode (recommended for large datasets)
 
@@ -136,7 +165,8 @@ df %>%
 
 ## Files
 
-- `scraper/main.py` — Main async scraper
+- `scraper/main.py` — Apartments.com async scraper
+- `scraper/umn_listings.py` — UMN Listings (listings.umn.edu) scraper
 - `output/` — Runtime CSV and logs (git-ignored)
 - `requirements.txt` — Python dependencies
 
