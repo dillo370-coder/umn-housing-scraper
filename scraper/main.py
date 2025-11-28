@@ -856,30 +856,39 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
             for link in property_links:
                 try:
                     href = await link.get_attribute('href')
-                    if href and 'apartments.com/' in href:
-                        # Filter to only building URLs (not search/filter pages)
-                        # Note: '/apartments/' as a path segment typically indicates filter pages,
-                        # not building detail pages which have unique building slugs
-                        excluded_patterns = ['/search/', '?', 'bbox=']
-                        if not any(x in href for x in excluded_patterns):
-                            full_url = urljoin(BASE_URL, href)
-                            full_url = full_url.split('?')[0]
-                            # Make sure it looks like a building URL (has a building slug)
-                            # Building slugs are typically like "the-laker-minneapolis-mn" 
-                            # which is always more than 5 characters and contains hyphens
-                            path = full_url.replace('https://www.apartments.com/', '').strip('/')
-                            parts = path.split('/')
-                            if len(parts) >= 1:
-                                slug = parts[0]
-                                # Valid building slug: at least 6 chars, contains hyphen, 
-                                # not a pure filter like "1-bedrooms"
-                                is_valid_building = (
-                                    len(slug) > 5 and 
-                                    '-' in slug and 
-                                    not slug.endswith('-mn')  # City pages end with -mn
-                                )
-                                if is_valid_building:
-                                    building_urls.add(full_url)
+                    if not href:
+                        continue
+                    
+                    # Resolve relative URLs to absolute using the base URL
+                    full_url = urljoin(BASE_URL, href)
+                    full_url = full_url.split('?')[0]  # Remove query params
+                    
+                    # SECURITY: Validate the URL starts with our expected domain
+                    # This prevents following malicious redirects to other domains
+                    if not full_url.startswith('https://www.apartments.com/'):
+                        continue
+                        
+                    # Filter out search/filter pages (not building detail pages)
+                    excluded_patterns = ['/search/', 'bbox=']
+                    if any(x in full_url for x in excluded_patterns):
+                        continue
+                    
+                    # Make sure it looks like a building URL (has a building slug)
+                    # Building slugs are typically like "the-laker-minneapolis-mn/abc123"
+                    # which is always more than 5 characters and contains hyphens
+                    path = full_url.replace('https://www.apartments.com/', '').strip('/')
+                    parts = path.split('/')
+                    if len(parts) >= 1:
+                        slug = parts[0]
+                        # Valid building slug: at least 6 chars, contains hyphen, 
+                        # not a pure filter like "1-bedrooms" or a city like "minneapolis-mn"
+                        is_valid_building = (
+                            len(slug) > 5 and 
+                            '-' in slug and 
+                            not slug.endswith('-mn')  # City pages end with -mn
+                        )
+                        if is_valid_building:
+                            building_urls.add(full_url)
                 except Exception as e:
                     logger.warning(f"Error extracting link: {e}")
 
