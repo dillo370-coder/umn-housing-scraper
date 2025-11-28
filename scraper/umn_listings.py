@@ -47,9 +47,13 @@ PAGE_DELAY_VARIANCE = 3.0
 GEOCODE_DELAY_SECONDS = 1.0
 
 # Navigation settings
-NAV_TIMEOUT = 90000  # 90 seconds for page load
+NAV_TIMEOUT = 120000  # 120 seconds for initial page load (domcontentloaded)
+NETWORKIDLE_TIMEOUT = 60000  # 60 seconds for network idle wait
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 5
+
+# Bot/captcha detection keywords
+BOT_BLOCK_KEYWORDS = ['captcha', 'unusual traffic', 'verify you are human', 'are you a robot', 'bot detection']
 
 # Scroll settings
 SCROLL_DELAY_MIN = 0.8
@@ -235,6 +239,15 @@ def parse_beds_baths(text: str) -> tuple:
         baths = float(bath_match.group(1))
     
     return beds, baths
+
+
+def detect_bot_block(page_content: str) -> bool:
+    """Check if page content indicates bot blocking or captcha."""
+    content_lower = page_content.lower()
+    for keyword in BOT_BLOCK_KEYWORDS:
+        if keyword in content_lower:
+            return True
+    return False
 
 
 # ============================================================================
@@ -619,7 +632,7 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
     async with async_playwright() as p:
         # Use Firefox which is often better at avoiding detection
         selected_user_agent = random.choice(USER_AGENTS)
-        logger.info(f"Using user agent: {selected_user_agent[:50]}...")
+        logger.info(f"Using user agent: {selected_user_agent}")
         
         # Enhanced browser arguments for stealth
         browser_args = [
@@ -631,27 +644,22 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
             '--disable-site-isolation-trials',
         ]
         
-        browser = await p.chromium.launch(
-            headless=headless,
-            args=browser_args
-        )
-
-        # Enhanced context with more realistic settings
-        context = await browser.new_context(
-            user_agent=selected_user_agent,
-            viewport={'width': 1920, 'height': 1080},
-            locale='en-US',
-            timezone_id='America/Chicago',
-            java_script_enabled=True,
-            has_touch=False,
-            is_mobile=False,
-            device_scale_factor=1,
-            permissions=['geolocation'],
-            geolocation={'latitude': UMN_CAMPUS_LAT, 'longitude': UMN_CAMPUS_LON},
-        )
+        # Context options for browser - reused for Firefox fallback
+        context_options = {
+            'user_agent': selected_user_agent,
+            'viewport': {'width': 1920, 'height': 1080},
+            'locale': 'en-US',
+            'timezone_id': 'America/Chicago',
+            'java_script_enabled': True,
+            'has_touch': False,
+            'is_mobile': False,
+            'device_scale_factor': 1,
+            'permissions': ['geolocation'],
+            'geolocation': {'latitude': UMN_CAMPUS_LAT, 'longitude': UMN_CAMPUS_LON},
+        }
         
-        # Add script to hide automation indicators
-        await context.add_init_script("""
+        # Init script to hide automation indicators
+        init_script = """
             // Override the navigator.webdriver property
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
@@ -666,51 +674,120 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
             Object.defineProperty(navigator, 'languages', {
                 get: () => ['en-US', 'en']
             });
-        """)
-
-        page = await context.new_page()
-
+        """
+        
+        async def attempt_navigation(browser_type, browser_name: str):
+            """
+            Attempt to navigate to the listings page with the given browser.
+            
+            Returns:
+                Tuple of (browser, context, page) on success, or (None, None, None) on failure.
+            """
+            logger.info(f"Launching {browser_name} browser...")
+            if browser_name == "Chromium":
+                browser = await browser_type.launch(headless=headless, args=browser_args)
+            else:
+                browser = await browser_type.launch(headless=headless)
+            
+            context = await browser.new_context(**context_options)
+            await context.add_init_script(init_script)
+            page = await context.new_page()
+            
+            try:
+                # Navigate to listings page with retries
+                logger.info(f"Navigating to: {LISTING_PAGE}")
+                navigation_success = False
+                
+                for attempt in range(RETRY_ATTEMPTS):
+                    try:
+                        logger.info(f"Navigation attempt {attempt + 1}/{RETRY_ATTEMPTS} ({browser_name})...")
+                        # Step 1: Use domcontentloaded for initial HTML load (more reliable)
+                        await page.goto(LISTING_PAGE, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+                        
+                        # Step 2: Wait for network idle separately with its own timeout
+                        try:
+                            await page.wait_for_load_state('networkidle', timeout=NETWORKIDLE_TIMEOUT)
+                        except PlaywrightTimeout:
+                            logger.warning("Network idle timeout - continuing with partially loaded page")
+                        
+                        navigation_success = True
+                        break
+                    except PlaywrightTimeout as e:
+                        # Log detailed debugging info on timeout
+                        try:
+                            page_content = await page.content()
+                            content_len = len(page_content)
+                            snippet = page_content[:500] if page_content else "(empty)"
+                            logger.warning(f"Attempt {attempt + 1} timed out: {e}")
+                            logger.warning(f"Page content length: {content_len}")
+                            logger.debug(f"Page content snippet: {snippet}")
+                        except Exception:
+                            logger.warning(f"Attempt {attempt + 1} timed out: {e} (could not retrieve page content)")
+                        
+                        if attempt < RETRY_ATTEMPTS - 1:
+                            logger.info(f"Waiting {RETRY_DELAY} seconds before retry...")
+                            await asyncio.sleep(RETRY_DELAY)
+                    except Exception as e:
+                        logger.warning(f"Attempt {attempt + 1} failed: {e}")
+                        if attempt < RETRY_ATTEMPTS - 1:
+                            logger.info(f"Waiting {RETRY_DELAY} seconds before retry...")
+                            await asyncio.sleep(RETRY_DELAY)
+                
+                if not navigation_success:
+                    await browser.close()
+                    return None, None, None  # Signal failure
+                
+                # Wait for page to stabilize
+                await asyncio.sleep(5)
+                
+                # Check if page loaded correctly
+                page_content = await page.content()
+                if len(page_content) < 1000:
+                    logger.error("Page content seems too short - may not have loaded correctly")
+                    logger.info(f"Page content length: {len(page_content)}")
+                
+                # Check for bot blocking/captcha
+                if detect_bot_block(page_content):
+                    logger.error("="*60)
+                    logger.error("BOT DETECTION / CAPTCHA DETECTED")
+                    logger.error("="*60)
+                    logger.error("The site appears to be blocking automated access.")
+                    logger.error("Suggestions:")
+                    logger.error("  1. Run with --headless=False to solve captcha manually")
+                    logger.error("  2. Try using a different network or VPN")
+                    logger.error("  3. Wait and try again later")
+                    logger.error("="*60)
+                    await browser.close()
+                    return None, None, None
+                
+                # Check for common error pages
+                page_title = await page.title()
+                logger.info(f"Page title: {page_title}")
+                
+                return browser, context, page
+                
+            except Exception as e:
+                logger.error(f"Unexpected error during navigation: {e}")
+                await browser.close()
+                return None, None, None
+        
+        # Try Chromium first
+        browser, context, page = await attempt_navigation(p.chromium, "Chromium")
+        
+        # If Chromium fails, try Firefox as fallback
+        if browser is None:
+            logger.warning("="*60)
+            logger.warning("Chromium navigation failed. Attempting Firefox fallback...")
+            logger.warning("="*60)
+            browser, context, page = await attempt_navigation(p.firefox, "Firefox")
+        
+        if browser is None:
+            logger.error("All navigation attempts failed with both Chromium and Firefox.")
+            logger.error("Please check your internet connection and that listings.umn.edu is accessible.")
+            logger.error("If you're on a university network, you may need to use VPN or connect from a different network.")
+            return 0
+        
         try:
-            # Navigate to listings page with retries
-            logger.info(f"Navigating to: {LISTING_PAGE}")
-            navigation_success = False
-            
-            for attempt in range(RETRY_ATTEMPTS):
-                try:
-                    logger.info(f"Navigation attempt {attempt + 1}/{RETRY_ATTEMPTS}...")
-                    # Use 'load' first for initial page, more reliable
-                    await page.goto(LISTING_PAGE, wait_until="load", timeout=NAV_TIMEOUT)
-                    navigation_success = True
-                    break
-                except PlaywrightTimeout as e:
-                    logger.warning(f"Attempt {attempt + 1} timed out: {e}")
-                    if attempt < RETRY_ATTEMPTS - 1:
-                        logger.info(f"Waiting {RETRY_DELAY} seconds before retry...")
-                        await asyncio.sleep(RETRY_DELAY)
-                except Exception as e:
-                    logger.warning(f"Attempt {attempt + 1} failed: {e}")
-                    if attempt < RETRY_ATTEMPTS - 1:
-                        logger.info(f"Waiting {RETRY_DELAY} seconds before retry...")
-                        await asyncio.sleep(RETRY_DELAY)
-            
-            if not navigation_success:
-                logger.error("All navigation attempts failed.")
-                logger.error("Please check your internet connection and that listings.umn.edu is accessible.")
-                logger.error("If you're on a university network, you may need to use VPN or connect from a different network.")
-                return 0
-            
-            # Wait for page to stabilize
-            await asyncio.sleep(5)
-            
-            # Check if page loaded correctly
-            page_content = await page.content()
-            if len(page_content) < 1000:
-                logger.error("Page content seems too short - may not have loaded correctly")
-                logger.info(f"Page content length: {len(page_content)}")
-            
-            # Check for common error pages
-            page_title = await page.title()
-            logger.info(f"Page title: {page_title}")
             
             # Try to load all listings by clicking "Load More" multiple times
             load_attempts = 0
