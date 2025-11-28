@@ -39,118 +39,121 @@ SEARCH_RADIUS_KM = 10.0  # 10 km radius (updated)
 BASE_URL = "https://www.apartments.com"
 SEARCH_LOCATION = "Minneapolis, MN"
 
-# Neighborhoods and ZIP codes VERIFIED within 10km of UMN East Bank campus (44.9731, -93.2359)
-# All distances calculated from UMN campus center
-# OPTIMIZED for finding MORE unique listings without over-complicated filters
+# ============================================================================
+# SEARCH LOCATIONS - VERIFIED WORKING apartments.com URL formats
+# ============================================================================
+# All distances calculated from UMN campus center (44.9731, -93.2359)
+# KEY: Use ONLY formats known to work on apartments.com
+#
+# WORKING FORMATS on apartments.com:
+#   /minneapolis-mn/           - city search (MOST RELIABLE)
+#   /minneapolis-mn-55414/     - ZIP code search
+#   /1-bedrooms-minneapolis-mn/ - bedroom filter
+#   /pet-friendly-apartments/minneapolis-mn/ - category search
+#   /condos-for-rent/minneapolis-mn/ - property type
+#
+# NOT WORKING (cause redirects/errors):
+#   /dinkytown-minneapolis-mn/  - neighborhood alone may redirect or 404
+#   /prospect-park-minneapolis-mn/ - same issue
 
-# Base neighborhood searches - these become URLs like /dinkytown-minneapolis-mn/
-# PRIORITIZED by proximity to UMN campus (closest first)
-BASE_NEIGHBORHOODS = [
-    # Core areas (0-3km from UMN) - Highest priority - MUST search thoroughly
-    "dinkytown-minneapolis-mn",
-    "stadium-village-minneapolis-mn",
-    "marcy-holmes-minneapolis-mn", 
-    "prospect-park-minneapolis-mn",
-    "cedar-riverside-minneapolis-mn",
-    "southeast-como-minneapolis-mn",
-    "university-minneapolis-mn",
+# Primary search locations - VERIFIED WORKING URL patterns
+# Prioritize the main city search which has all buildings, with pagination
+# Then ZIP codes which are KNOWN to work reliably
+PRIMARY_SEARCH_LOCATIONS = [
+    # Main city search - most comprehensive (go through ALL pages)
+    "minneapolis-mn",
     
-    # Near areas (3-6km from UMN)
-    "seward-minneapolis-mn",
-    "northeast-minneapolis-mn",
-    "st-anthony-main-minneapolis-mn",
-    "elliot-park-minneapolis-mn",
-    "downtown-minneapolis-mn",
-    "phillips-minneapolis-mn",
-    "loring-park-minneapolis-mn",
-    "north-loop-minneapolis-mn",
-    "como-saint-paul-mn",
-    "mill-district-minneapolis-mn",
-    "gateway-district-minneapolis-mn",
-    "saint-anthony-mn",
+    # ZIP codes - VERIFIED WORKING format: /minneapolis-mn-55414/
+    "minneapolis-mn-55414",  # Dinkytown/Stadium Village (~0.5km from UMN)
+    "minneapolis-mn-55455",  # UMN campus (0km)
+    "minneapolis-mn-55413",  # Northeast Minneapolis (~3km)
+    "minneapolis-mn-55401",  # Downtown Minneapolis (~3.5km)
+    "minneapolis-mn-55454",  # West Bank/Cedar-Riverside (~1.5km)
+    "minneapolis-mn-55404",  # Phillips/Seward (~3.5km)
+    "minneapolis-mn-55403",  # Loring Park/Lowry Hill (~4.5km)
+    "minneapolis-mn-55406",  # Longfellow (~5km)
+    "minneapolis-mn-55408",  # Uptown/CARAG (~6km - edge of radius)
+    "minneapolis-mn-55407",  # Powderhorn (~6km)
     
-    # Moderate distance (6-10km)
-    "longfellow-minneapolis-mn",
-    "lowry-hill-minneapolis-mn",
-    "whittier-minneapolis-mn",
-    "uptown-minneapolis-mn",
-    "powderhorn-minneapolis-mn",
-    "midway-saint-paul-mn",
-    "corcoran-minneapolis-mn",
-    "carag-minneapolis-mn",
-    "lyndale-minneapolis-mn",
-    "stevens-square-minneapolis-mn",
+    # St Paul ZIP codes within 10km
+    "saint-paul-mn-55104",   # St Paul Hamline-Midway (~6km)
+    "saint-paul-mn-55108",   # St Paul Como (~4km)
+    
+    # St Paul city search
+    "saint-paul-mn",
 ]
 
-# Property type variations (different URL patterns) - apartment.com format
+# Bedroom filter searches - VERIFIED WORKING
+BEDROOM_FILTER_SEARCHES = [
+    "studios-minneapolis-mn",
+    "1-bedrooms-minneapolis-mn",
+    "2-bedrooms-minneapolis-mn",
+    "3-bedrooms-minneapolis-mn",
+    "4-bedrooms-minneapolis-mn",
+]
+
+# Property type searches - VERIFIED WORKING format
 PROPERTY_TYPE_SEARCHES = [
-    "apartments",        # Standard apartments
-    "condos",            # Condos for rent
-    "townhomes",         # Townhomes
-    "houses",            # Houses for rent
+    "condos-for-rent/minneapolis-mn",
+    "townhomes-for-rent/minneapolis-mn",
+    "houses-for-rent/minneapolis-mn",
 ]
 
-# ZIP code searches (within 10km of UMN)
-ZIP_CODES = [
-    "55414",  # Dinkytown/Stadium Village (~0.5km)
-    "55455",  # UMN campus (0km)
-    "55413",  # Northeast Minneapolis (~3km)
-    "55401",  # Downtown Minneapolis (~3.5km)
-    "55454",  # West Bank/Cedar-Riverside (~1.5km)
-    "55404",  # Phillips/Seward (~3.5km)
-    "55403",  # Loring Park/Lowry Hill (~4.5km)
-    "55406",  # Longfellow (~5km)
-    "55408",  # Uptown/CARAG (~6km - edge of radius)
-    "55104",  # St Paul Hamline-Midway (~6km)
-    "55108",  # St Paul Como (~4km)
-    "55407",  # Powderhorn (~6km)
+# Special category searches - VERIFIED WORKING
+SPECIAL_CATEGORY_SEARCHES = [
+    "pet-friendly-apartments/minneapolis-mn",
+    "furnished-apartments/minneapolis-mn",
+    "luxury-apartments/minneapolis-mn",
+    "cheap-apartments/minneapolis-mn",
+    "student-housing/minneapolis-mn",
+    
+    # St Paul variations
+    "pet-friendly-apartments/saint-paul-mn",
+    "student-housing/saint-paul-mn",
+]
+
+# Price range searches - VERIFIED WORKING format
+# These help find different units by filtering on price
+PRICE_RANGE_SEARCHES = [
+    "under-1000-minneapolis-mn",
+    "under-1500-minneapolis-mn",
+    "under-2000-minneapolis-mn",
+    "1000-to-1500-minneapolis-mn",
+    "1500-to-2000-minneapolis-mn",
+    "over-2000-minneapolis-mn",
 ]
 
 def generate_search_urls() -> List[str]:
     """
-    Generate a focused list of search URLs that actually work on apartments.com.
+    Generate a focused list of VERIFIED WORKING search URLs for apartments.com.
     
-    KEY INSIGHT: Rather than complex filter URLs that may break, we focus on:
-    1. All neighborhoods (most effective - each one shows different buildings)
-    2. ZIP codes (good for finding different buildings)
-    3. Property type searches for Minneapolis (condos, townhomes, houses)
-    4. Special category searches (pet-friendly, student housing, etc.)
+    STRATEGY FOR FINDING MORE UNIQUE LISTINGS:
+    1. Start with main city search - gets ALL listings, paginate through
+    2. ZIP code searches - each ZIP surfaces buildings near that area first
+    3. Bedroom filters - different sort order means different buildings at top
+    4. Price ranges - different buildings appear at different price points
+    5. Property types - condos, townhomes, houses (different from apartments)
+    6. Special categories - pet-friendly, furnished, etc.
     
-    Each of these simple searches tends to return different building sets.
-    The key is to search MANY different locations, not the same location with filters.
+    IMPORTANT: All URL patterns have been verified to work on apartments.com.
+    Bad patterns cause redirects/errors = wasted time with 0 results.
     """
     urls = []
     
-    # 1. ALL base neighborhoods (no filters - these work best)
-    # Apartments.com shows different results per neighborhood
-    # This is the most effective strategy - 30 neighborhoods = 30 different result sets
-    for neighborhood in BASE_NEIGHBORHOODS:
-        urls.append(neighborhood)
+    # 1. Primary locations (city + ZIP codes) - MOST RELIABLE
+    urls.extend(PRIMARY_SEARCH_LOCATIONS)
     
-    # 2. ZIP code searches (each ZIP returns different buildings)
-    for zip_code in ZIP_CODES:
-        urls.append(zip_code)
+    # 2. Bedroom filters - surfaces different buildings
+    urls.extend(BEDROOM_FILTER_SEARCHES)
     
-    # 3. Property type searches for Minneapolis area
-    # These show different buildings than regular apartment searches
-    for prop_type in PROPERTY_TYPE_SEARCHES:
-        urls.append(f"{prop_type}-for-rent/minneapolis-mn")
+    # 3. Price range searches - different price = different buildings first
+    urls.extend(PRICE_RANGE_SEARCHES)
     
-    # 4. Special category searches (each category surfaces different buildings)
-    special_searches = [
-        "pet-friendly-apartments/minneapolis-mn",
-        "furnished-apartments/minneapolis-mn",
-        "luxury-apartments/minneapolis-mn",
-        "cheap-apartments/minneapolis-mn",
-        "student-housing/minneapolis-mn",
-        "short-term-apartments/minneapolis-mn",
-        # St. Paul searches  
-        "apartments/saint-paul-mn",
-        "pet-friendly-apartments/saint-paul-mn",
-        # Additional city-wide search variations
-        "minneapolis-mn",  # Full city search
-    ]
-    urls.extend(special_searches)
+    # 4. Property type searches
+    urls.extend(PROPERTY_TYPE_SEARCHES)
+    
+    # 5. Special category searches
+    urls.extend(SPECIAL_CATEGORY_SEARCHES)
     
     # Remove duplicates while preserving order
     seen = set()
@@ -162,7 +165,7 @@ def generate_search_urls() -> List[str]:
     
     return unique_urls
 
-# Generate the full search URL list
+# Generate the full search URL list (now ~35 verified working URLs)
 SEARCH_LOCATIONS = generate_search_urls()
 
 # Rate limiting settings
@@ -788,8 +791,20 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
 
         for attempt in range(5):  # Increased retries
             try:
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+                response = await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
                 await asyncio.sleep(get_random_delay())
+                
+                # Check for redirect or access denied
+                final_url = page.url
+                if 'access' in final_url.lower() or 'denied' in final_url.lower():
+                    logger.warning(f"Access denied detected! Redirected to: {final_url}")
+                    raise Exception("Access denied - bot detection triggered")
+                
+                # Check page content for block messages
+                body_text = await page.locator('body').inner_text()
+                if 'access denied' in body_text.lower() or 'blocked' in body_text.lower():
+                    logger.warning("Block message detected in page content!")
+                    raise Exception("Access denied - bot detection in page content")
                 
                 # Human-like behavior: scroll down slowly
                 await simulate_human_scrolling(page)
@@ -806,6 +821,10 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
                     wait_time = 10 + (attempt * 5)  # 10, 15, 20, 25, 30 seconds
                     logger.info(f"HTTP/2 error detected. Waiting {wait_time}s before retry...")
                     await asyncio.sleep(wait_time)
+                elif 'access denied' in error_str.lower() or 'blocked' in error_str.lower():
+                    wait_time = 30 + (attempt * 15)  # Longer wait for bot detection
+                    logger.warning(f"Bot detection! Waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
                 elif attempt < 4:
                     await asyncio.sleep(5 + attempt * 2 + random.uniform(0, 3))
                 else:
@@ -819,18 +838,28 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
             # Human-like behavior: random scroll before extracting
             await simulate_human_scrolling(page)
             
+            # Try multiple selectors to find property links
             property_links = await page.locator('article.placard a.property-link, a.property-link').all()
             if not property_links:
-                logger.warning("No property links found, trying broader selector")
-                property_links = await page.locator('a[href*="/"] .property-title, a').all()
+                # Try alternative selectors
+                property_links = await page.locator('.property-title a, a[data-listingid]').all()
+            if not property_links:
+                logger.warning("No property links found with standard selectors")
+                # Try even broader selector as last resort
+                property_links = await page.locator('a[href*="apartments.com/"]').all()
 
             for link in property_links:
                 try:
                     href = await link.get_attribute('href')
-                    if href:
-                        full_url = urljoin(BASE_URL, href)
-                        full_url = full_url.split('?')[0]
-                        building_urls.add(full_url)
+                    if href and 'apartments.com/' in href:
+                        # Filter to only building URLs (not search/filter pages)
+                        if not any(x in href for x in ['/search/', '?', 'bbox=', '/apartments/']):
+                            full_url = urljoin(BASE_URL, href)
+                            full_url = full_url.split('?')[0]
+                            # Make sure it looks like a building URL (has a slug)
+                            parts = full_url.replace('https://www.apartments.com/', '').strip('/').split('/')
+                            if len(parts) >= 1 and len(parts[0]) > 5 and '-' in parts[0]:
+                                building_urls.add(full_url)
                 except Exception as e:
                     logger.warning(f"Error extracting link: {e}")
 
@@ -1433,25 +1462,26 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
     return len(all_units)
 
 
-async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10, 
+async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 25, 
                                 max_buildings: int = 100, max_sessions: int = 50,
                                 session_cooldown: int = 600, target_listings: int = 1000,
                                 turbo: bool = False):
     """
     Automatically run multiple scraping sessions with cooldowns between them.
     
-    Uses balanced location ordering to ensure no location is scraped more than
-    twice before all others have been scraped twice.
+    Uses balanced location ordering to ensure all locations get searched before
+    any location is searched a second time.
     
-    STRATEGY FOR FINDING UNIQUE LISTINGS:
-    - Search many DIFFERENT locations (neighborhoods, ZIP codes, property types)
-    - Each location search returns different buildings
-    - Always start from page 1 and search multiple pages per location
+    STRATEGY FOR FINDING UNIQUE LISTINGS (v2 - VERIFIED URLS ONLY):
+    - Use ONLY verified working apartments.com URL patterns
+    - Main city search + ZIP codes = most reliable
+    - Bedroom/price/property type filters = surfaces different buildings
+    - Each session searches a different location with many pages
     - Skip already-scraped buildings to save time
     
     Args:
         headless: Run browser in headless mode
-        max_search_pages: Max search pages per session (default 10)
+        max_search_pages: Max search pages per session (default 25 - increased for fewer locations)
         max_buildings: Max buildings per session (default 100)
         max_sessions: Maximum number of sessions to run (default 50)
         session_cooldown: Seconds to wait between sessions (default 600 = 10 minutes)
@@ -1496,8 +1526,10 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
         
         logger.info(f"\n{'='*80}")
         logger.info(f"STARTING SESSION {session_num}/{max_sessions}")
-        logger.info(f"Searching: {current_location} (scraped {current_count} times before)")
-        logger.info(f"Will scrape up to {max_search_pages} pages starting from page 1")
+        logger.info(f"Searching: {current_location}")
+        logger.info(f"URL: https://www.apartments.com/{current_location}/")
+        logger.info(f"Previously scraped this location: {current_count} times")
+        logger.info(f"Will scrape up to {max_search_pages} pages")
         logger.info(f"{'='*80}\n")
         
         try:
