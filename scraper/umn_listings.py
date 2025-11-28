@@ -173,6 +173,7 @@ def geocode_address(address: str) -> Optional[Dict[str, float]]:
             headers={"User-Agent": "UMNHousingResearch/1.0"},
             timeout=10
         )
+        resp.raise_for_status()  # Check for HTTP errors
         data = resp.json()
         if data:
             return {"lat": float(data[0]["lat"]), "lon": float(data[0]["lon"])}
@@ -189,9 +190,7 @@ def parse_rent(rent_text: str) -> tuple:
     rent_text = rent_text.replace(',', '').replace('$', '').strip()
     
     # Check if it's per bed pricing
-    is_per_bed = False
     if 'bed' in rent_text.lower() or '/bed' in rent_text.lower():
-        is_per_bed = True
         price_type = "per_bed"
     else:
         price_type = "total"
@@ -314,9 +313,9 @@ async def scrape_listing(page: Page, url: str) -> Optional[UnitListing]:
             logger.warning(f"Listing not found: {url}")
             return None
         
-        # Generate listing ID from URL
-        listing_id = url.split('/')[-1] if url.split('/')[-1] else url.split('/')[-2]
-        listing_id = f"umn_{listing_id}"
+        # Generate listing ID from URL (handle trailing slash)
+        url_parts = [part for part in url.rstrip('/').split('/') if part]
+        listing_id = f"umn_{url_parts[-1]}" if url_parts else f"umn_{hash(url)}"
         
         # Try to extract listing data
         listing = UnitListing(
@@ -532,9 +531,9 @@ def geocode_and_filter_units(units: List[UnitListing]) -> List[UnitListing]:
     return filtered
 
 
-def load_existing_listings(csv_path: Path) -> Dict[str, UnitListing]:
-    """Load existing listings from CSV file."""
-    existing = {}
+def load_existing_listings(csv_path: Path) -> Dict[str, Any]:
+    """Load existing listings from CSV file as dictionaries."""
+    existing: Dict[str, Any] = {}
     if csv_path.exists():
         try:
             with open(csv_path, 'r', newline='', encoding='utf-8') as f:
