@@ -4,6 +4,9 @@ UMN Listings (listings.umn.edu) Web Scraper
 Scrapes the official University of Minnesota Off-Campus Housing Marketplace
 (powered by Rent College Pads) for student housing listings.
 
+IMPORTANT: This site is powered by Rent College Pads and may have bot protection.
+The scraper uses enhanced stealth settings to work around these restrictions.
+
 Usage:
   python3 -m scraper.umn_listings --headless=False  # test run with visible browser
   python3 -m scraper.umn_listings --headless=True   # full headless run
@@ -23,7 +26,7 @@ from math import radians, cos, sin, asin, sqrt
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Set
 
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 import requests
 
 
@@ -39,20 +42,28 @@ BASE_URL = "https://listings.umn.edu"
 LISTING_PAGE = f"{BASE_URL}/listing"
 
 # Rate limiting settings - more conservative for university site
-PAGE_DELAY_SECONDS = 3.0
-PAGE_DELAY_VARIANCE = 2.0
+PAGE_DELAY_SECONDS = 4.0
+PAGE_DELAY_VARIANCE = 3.0
 GEOCODE_DELAY_SECONDS = 1.0
 
-# Scroll settings
-SCROLL_DELAY_MIN = 0.5
-SCROLL_DELAY_MAX = 1.5
+# Navigation settings
+NAV_TIMEOUT = 90000  # 90 seconds for page load
+RETRY_ATTEMPTS = 3
+RETRY_DELAY = 5
 
-# User agents
+# Scroll settings
+SCROLL_DELAY_MIN = 0.8
+SCROLL_DELAY_MAX = 2.0
+
+# User agents - more variety helps avoid detection
 USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0',
 ]
 
 # Output
@@ -597,49 +608,99 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
     logger.info(f"Headless mode: {headless}")
     logger.info(f"Max listings: {max_listings if max_listings else 'unlimited'}")
     logger.info(f"Output file: {OUTPUT_CSV}")
+    
+    # Recommend non-headless for this site
+    if headless:
+        logger.warning("NOTE: listings.umn.edu may block headless browsers.")
+        logger.warning("If scraping fails, try with --headless=False")
 
     all_units: List[UnitListing] = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=headless,
-            args=[
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--no-sandbox',
-            ]
-        )
-
+        # Use Firefox which is often better at avoiding detection
         selected_user_agent = random.choice(USER_AGENTS)
         logger.info(f"Using user agent: {selected_user_agent[:50]}...")
+        
+        # Enhanced browser arguments for stealth
+        browser_args = [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-dev-shm-usage',
+            '--no-sandbox',
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-site-isolation-trials',
+        ]
+        
+        browser = await p.chromium.launch(
+            headless=headless,
+            args=browser_args
+        )
 
+        # Enhanced context with more realistic settings
         context = await browser.new_context(
             user_agent=selected_user_agent,
             viewport={'width': 1920, 'height': 1080},
             locale='en-US',
             timezone_id='America/Chicago',
+            java_script_enabled=True,
+            has_touch=False,
+            is_mobile=False,
+            device_scale_factor=1,
+            permissions=['geolocation'],
+            geolocation={'latitude': UMN_CAMPUS_LAT, 'longitude': UMN_CAMPUS_LON},
         )
+        
+        # Add script to hide automation indicators
+        await context.add_init_script("""
+            // Override the navigator.webdriver property
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            
+            // Override the plugins property
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            
+            // Override the languages property
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+            });
+        """)
 
         page = await context.new_page()
 
         try:
-            # Navigate to listings page
+            # Navigate to listings page with retries
             logger.info(f"Navigating to: {LISTING_PAGE}")
-            try:
-                # First try networkidle
-                await page.goto(LISTING_PAGE, wait_until="networkidle", timeout=60000)
-            except Exception as nav_error:
-                # If networkidle times out, try with domcontentloaded
-                logger.warning(f"Navigation with networkidle failed: {nav_error}")
-                logger.info("Retrying with domcontentloaded...")
-                try:
-                    await page.goto(LISTING_PAGE, wait_until="domcontentloaded", timeout=60000)
-                except Exception as e:
-                    logger.error(f"Navigation failed completely: {e}")
-                    logger.error("Please check your internet connection and that listings.umn.edu is accessible")
-                    return 0
+            navigation_success = False
             
-            await asyncio.sleep(3)
+            for attempt in range(RETRY_ATTEMPTS):
+                try:
+                    logger.info(f"Navigation attempt {attempt + 1}/{RETRY_ATTEMPTS}...")
+                    # Use 'load' first for initial page, more reliable
+                    await page.goto(LISTING_PAGE, wait_until="load", timeout=NAV_TIMEOUT)
+                    navigation_success = True
+                    break
+                except PlaywrightTimeout as e:
+                    logger.warning(f"Attempt {attempt + 1} timed out: {e}")
+                    if attempt < RETRY_ATTEMPTS - 1:
+                        logger.info(f"Waiting {RETRY_DELAY} seconds before retry...")
+                        await asyncio.sleep(RETRY_DELAY)
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt + 1} failed: {e}")
+                    if attempt < RETRY_ATTEMPTS - 1:
+                        logger.info(f"Waiting {RETRY_DELAY} seconds before retry...")
+                        await asyncio.sleep(RETRY_DELAY)
+            
+            if not navigation_success:
+                logger.error("All navigation attempts failed.")
+                logger.error("Please check your internet connection and that listings.umn.edu is accessible.")
+                logger.error("If you're on a university network, you may need to use VPN or connect from a different network.")
+                return 0
+            
+            # Wait for page to stabilize
+            await asyncio.sleep(5)
             
             # Check if page loaded correctly
             page_content = await page.content()
