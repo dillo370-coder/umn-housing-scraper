@@ -181,6 +181,10 @@ SCROLL_DELAY_MIN = 0.5  # Minimum delay when scrolling
 SCROLL_DELAY_MAX = 2.0  # Maximum delay when scrolling
 MOUSE_MOVE_ENABLED = True  # Enable simulated mouse movements
 
+# Bot detection retry settings (when "Access Denied" is detected)
+BOT_DETECTION_BASE_WAIT = 30  # Base seconds to wait when bot detected
+BOT_DETECTION_RETRY_INCREMENT = 15  # Additional seconds per retry attempt
+
 
 def get_random_delay() -> float:
     """Get a randomized delay to avoid detection patterns."""
@@ -822,7 +826,8 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
                     logger.info(f"HTTP/2 error detected. Waiting {wait_time}s before retry...")
                     await asyncio.sleep(wait_time)
                 elif 'access denied' in error_str.lower() or 'blocked' in error_str.lower():
-                    wait_time = 30 + (attempt * 15)  # Longer wait for bot detection
+                    # Use defined constants for bot detection wait times
+                    wait_time = BOT_DETECTION_BASE_WAIT + (attempt * BOT_DETECTION_RETRY_INCREMENT)
                     logger.warning(f"Bot detection! Waiting {wait_time}s before retry...")
                     await asyncio.sleep(wait_time)
                 elif attempt < 4:
@@ -853,13 +858,28 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
                     href = await link.get_attribute('href')
                     if href and 'apartments.com/' in href:
                         # Filter to only building URLs (not search/filter pages)
-                        if not any(x in href for x in ['/search/', '?', 'bbox=', '/apartments/']):
+                        # Note: '/apartments/' as a path segment typically indicates filter pages,
+                        # not building detail pages which have unique building slugs
+                        excluded_patterns = ['/search/', '?', 'bbox=']
+                        if not any(x in href for x in excluded_patterns):
                             full_url = urljoin(BASE_URL, href)
                             full_url = full_url.split('?')[0]
-                            # Make sure it looks like a building URL (has a slug)
-                            parts = full_url.replace('https://www.apartments.com/', '').strip('/').split('/')
-                            if len(parts) >= 1 and len(parts[0]) > 5 and '-' in parts[0]:
-                                building_urls.add(full_url)
+                            # Make sure it looks like a building URL (has a building slug)
+                            # Building slugs are typically like "the-laker-minneapolis-mn" 
+                            # which is always more than 5 characters and contains hyphens
+                            path = full_url.replace('https://www.apartments.com/', '').strip('/')
+                            parts = path.split('/')
+                            if len(parts) >= 1:
+                                slug = parts[0]
+                                # Valid building slug: at least 6 chars, contains hyphen, 
+                                # not a pure filter like "1-bedrooms"
+                                is_valid_building = (
+                                    len(slug) > 5 and 
+                                    '-' in slug and 
+                                    not slug.endswith('-mn')  # City pages end with -mn
+                                )
+                                if is_valid_building:
+                                    building_urls.add(full_url)
                 except Exception as e:
                     logger.warning(f"Error extracting link: {e}")
 
