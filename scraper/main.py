@@ -144,7 +144,7 @@ def generate_search_urls() -> List[str]:
         "cheap-apartments/minneapolis-mn",
         "student-housing/minneapolis-mn",
         "short-term-apartments/minneapolis-mn",
-        # St Paul searches  
+        # St. Paul searches  
         "apartments/saint-paul-mn",
         "pet-friendly-apartments/saint-paul-mn",
         # Additional city-wide search variations
@@ -1436,8 +1436,7 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
 async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10, 
                                 max_buildings: int = 100, max_sessions: int = 50,
                                 session_cooldown: int = 600, target_listings: int = 1000,
-                                start_page: int = 1, turbo: bool = False,
-                                deep_scrape: bool = False):
+                                turbo: bool = False):
     """
     Automatically run multiple scraping sessions with cooldowns between them.
     
@@ -1457,9 +1456,7 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
         max_sessions: Maximum number of sessions to run (default 50)
         session_cooldown: Seconds to wait between sessions (default 600 = 10 minutes)
         target_listings: Stop when this many total listings are collected
-        start_page: Not used - always starts from page 1
         turbo: Use faster delays (higher risk of detection but more data)
-        deep_scrape: Not used - focus is on different locations instead
     """
     # If turbo mode, use faster delays
     global PAGE_DELAY_SECONDS
@@ -1668,11 +1665,6 @@ Examples:
         action='store_true',
         help='🚀 TURBO MODE: Use faster delays for quicker scraping (higher risk of detection). Good when you need data fast.'
     )
-    parser.add_argument(
-        '--deep_scrape',
-        action='store_true',
-        help='🔍 DEEP SCRAPE MODE: Use price/bedroom filters to find more unique listings. Recommended for maximizing data collection.'
-    )
     
     # Direct URL scraping mode
     parser.add_argument(
@@ -1836,9 +1828,7 @@ if __name__ == "__main__":
             max_sessions=args.max_sessions,
             session_cooldown=args.session_cooldown,
             target_listings=args.target_listings,
-            start_page=args.start_page,
-            turbo=args.turbo,
-            deep_scrape=args.deep_scrape
+            turbo=args.turbo
         ))
     else:
         # Single session mode
