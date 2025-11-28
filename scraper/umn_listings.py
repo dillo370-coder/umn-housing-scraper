@@ -625,8 +625,31 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
         try:
             # Navigate to listings page
             logger.info(f"Navigating to: {LISTING_PAGE}")
-            await page.goto(LISTING_PAGE, wait_until="networkidle", timeout=60000)
+            try:
+                # First try networkidle
+                await page.goto(LISTING_PAGE, wait_until="networkidle", timeout=60000)
+            except Exception as nav_error:
+                # If networkidle times out, try with domcontentloaded
+                logger.warning(f"Navigation with networkidle failed: {nav_error}")
+                logger.info("Retrying with domcontentloaded...")
+                try:
+                    await page.goto(LISTING_PAGE, wait_until="domcontentloaded", timeout=60000)
+                except Exception as e:
+                    logger.error(f"Navigation failed completely: {e}")
+                    logger.error("Please check your internet connection and that listings.umn.edu is accessible")
+                    return 0
+            
             await asyncio.sleep(3)
+            
+            # Check if page loaded correctly
+            page_content = await page.content()
+            if len(page_content) < 1000:
+                logger.error("Page content seems too short - may not have loaded correctly")
+                logger.info(f"Page content length: {len(page_content)}")
+            
+            # Check for common error pages
+            page_title = await page.title()
+            logger.info(f"Page title: {page_title}")
             
             # Try to load all listings by clicking "Load More" multiple times
             load_attempts = 0
