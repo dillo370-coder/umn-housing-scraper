@@ -41,44 +41,78 @@ SEARCH_LOCATION = "Minneapolis, MN"
 
 # Neighborhoods and ZIP codes VERIFIED within 10km of UMN East Bank campus (44.9731, -93.2359)
 # All distances calculated from UMN campus center
-# EXPANDED list with more specific searches to find unique listings
-SEARCH_LOCATIONS = [
-    # Core areas (0-3km from UMN) - High priority
-    "Dinkytown, Minneapolis, MN",           # ~0.5km - immediate campus area
-    "Stadium Village, Minneapolis, MN",      # ~0.5km - immediate campus area
-    "Marcy-Holmes, Minneapolis, MN",         # ~1km - just north of campus
-    "Prospect Park, Minneapolis, MN",        # ~1.5km - east of campus
-    "Cedar-Riverside, Minneapolis, MN",      # ~1.5km - west bank area
-    "Southeast Como, Minneapolis, MN",       # ~2km - north of campus
-    "University, Minneapolis, MN",           # ~0km - campus searches
+# GREATLY EXPANDED list with filter URLs to find MORE unique listings
+# Using apartments.com's URL filter parameters for price ranges, bedrooms, etc.
+
+# Base neighborhood searches - these become URLs like /dinkytown-minneapolis-mn/
+BASE_NEIGHBORHOODS = [
+    # Core areas (0-3km from UMN) - Highest priority
+    "dinkytown-minneapolis-mn",
+    "stadium-village-minneapolis-mn",
+    "marcy-holmes-minneapolis-mn", 
+    "prospect-park-minneapolis-mn",
+    "cedar-riverside-minneapolis-mn",
+    "southeast-como-minneapolis-mn",
+    "university-minneapolis-mn",
     
     # Near areas (3-6km from UMN)
-    "Seward, Minneapolis, MN",               # ~3km - south
-    "Northeast Minneapolis, MN",             # ~3km - across the river
-    "St Anthony Main, Minneapolis, MN",      # ~2.5km - across river
-    "Elliot Park, Minneapolis, MN",          # ~3km - southwest
-    "Downtown Minneapolis, MN",              # ~3.5km - west
-    "Phillips, Minneapolis, MN",             # ~4km - south
-    "Loring Park, Minneapolis, MN",          # ~4km - west
-    "North Loop, Minneapolis, MN",           # ~4km - northwest
-    "Como, St Paul, MN",                     # ~4km - east (St Paul side)
-    "Mill District, Minneapolis, MN",        # ~3km - downtown area
-    "Gateway District, Minneapolis, MN",     # ~3km - downtown area
-    "Saint Anthony, MN",                     # ~3km - near NE Minneapolis
+    "seward-minneapolis-mn",
+    "northeast-minneapolis-mn",
+    "st-anthony-main-minneapolis-mn",
+    "elliot-park-minneapolis-mn",
+    "downtown-minneapolis-mn",
+    "phillips-minneapolis-mn",
+    "loring-park-minneapolis-mn",
+    "north-loop-minneapolis-mn",
+    "como-saint-paul-mn",
+    "mill-district-minneapolis-mn",
+    "gateway-district-minneapolis-mn",
+    "saint-anthony-mn",
     
-    # Moderate distance (6-10km from UMN)
-    "Longfellow, Minneapolis, MN",           # ~5km - south
-    "Lowry Hill, Minneapolis, MN",           # ~5km - west
-    "Whittier, Minneapolis, MN",             # ~5km - southwest
-    "Uptown, Minneapolis, MN",               # ~6km - southwest (edge of radius)
-    "Powderhorn, Minneapolis, MN",           # ~6km - south
-    "Midway, St Paul, MN",                   # ~6km - east
-    "Corcoran, Minneapolis, MN",             # ~5km - south
-    "CARAG, Minneapolis, MN",                # ~6km - Calhoun area
-    "Lyndale, Minneapolis, MN",              # ~5km - south of downtown
-    "Stevens Square, Minneapolis, MN",       # ~4km - near Loring Park
-    
-    # ZIP codes within 10km of UMN - for different search results
+    # Moderate distance (6-10km)
+    "longfellow-minneapolis-mn",
+    "lowry-hill-minneapolis-mn",
+    "whittier-minneapolis-mn",
+    "uptown-minneapolis-mn",
+    "powderhorn-minneapolis-mn",
+    "midway-saint-paul-mn",
+    "corcoran-minneapolis-mn",
+    "carag-minneapolis-mn",
+    "lyndale-minneapolis-mn",
+    "stevens-square-minneapolis-mn",
+]
+
+# Price range filter suffixes for apartments.com URLs
+# These help find different listings by price segment
+PRICE_FILTERS = [
+    "",  # No filter - all prices
+    "min-500-max-1000/",       # Budget: $500-$1000
+    "min-1000-max-1500/",      # Mid-low: $1000-$1500
+    "min-1500-max-2000/",      # Mid: $1500-$2000
+    "min-2000-max-2500/",      # Mid-high: $2000-$2500
+    "min-2500/",               # Luxury: $2500+
+    "max-1200/",               # Affordable: under $1200
+]
+
+# Bedroom filters
+BEDROOM_FILTERS = [
+    "",  # All bedrooms
+    "studios/",           # Studios only
+    "1-bedrooms/",        # 1 BR only
+    "2-bedrooms/",        # 2 BR only
+    "3-bedrooms/",        # 3 BR only
+]
+
+# Property type variations (different URL patterns)
+PROPERTY_TYPE_SEARCHES = [
+    "apartments",        # Standard apartments
+    "condos",            # Condos for rent
+    "townhomes",         # Townhomes
+    "houses",            # Houses for rent
+]
+
+# ZIP code searches (within 10km of UMN)
+ZIP_CODES = [
     "55414",  # Dinkytown/Stadium Village (~0.5km)
     "55455",  # UMN campus (0km)
     "55413",  # Northeast Minneapolis (~3km)
@@ -91,20 +125,67 @@ SEARCH_LOCATIONS = [
     "55104",  # St Paul Hamline-Midway (~6km)
     "55108",  # St Paul Como (~4km)
     "55407",  # Powderhorn (~6km)
-    "55411",  # Near North Minneapolis (~5km)
-    "55405",  # Bryn Mawr/Harrison (~5km)
-    
-    # Property type-specific searches (apartments.com supports these)
-    "condos for rent minneapolis mn",
-    "townhomes for rent minneapolis mn", 
-    "houses for rent minneapolis mn",
-    "cheap apartments minneapolis mn",
-    "luxury apartments minneapolis mn",
-    "studio apartments minneapolis mn",
-    "1 bedroom apartments minneapolis mn",
-    "2 bedroom apartments minneapolis mn",
-    "pet friendly apartments minneapolis mn",
 ]
+
+def generate_search_urls() -> List[str]:
+    """
+    Generate a comprehensive list of search URLs using apartments.com's filter system.
+    This creates many different search variations to find unique listings.
+    """
+    urls = []
+    
+    # 1. Neighborhood + price filter combinations (highest priority)
+    for neighborhood in BASE_NEIGHBORHOODS[:15]:  # Top 15 closest neighborhoods
+        for price_filter in PRICE_FILTERS:
+            if price_filter:
+                urls.append(f"{neighborhood}/{price_filter}")
+            else:
+                urls.append(neighborhood)
+    
+    # 2. Neighborhood + bedroom filter combinations
+    for neighborhood in BASE_NEIGHBORHOODS[:10]:  # Top 10 closest
+        for bed_filter in BEDROOM_FILTERS:
+            if bed_filter:
+                urls.append(f"{neighborhood}/{bed_filter}")
+    
+    # 3. ZIP code searches with filters
+    for zip_code in ZIP_CODES:
+        urls.append(zip_code)
+        for price_filter in PRICE_FILTERS[:4]:  # First 4 price ranges
+            if price_filter:
+                urls.append(f"{zip_code}/{price_filter}")
+    
+    # 4. Property type searches for Minneapolis
+    for prop_type in PROPERTY_TYPE_SEARCHES:
+        urls.append(f"{prop_type}-for-rent/minneapolis-mn")
+        # Also with price filters
+        for price_filter in PRICE_FILTERS[:3]:
+            if price_filter:
+                urls.append(f"{prop_type}-for-rent/minneapolis-mn/{price_filter}")
+    
+    # 5. Special filter combinations
+    special_searches = [
+        "pet-friendly-apartments/minneapolis-mn",
+        "furnished-apartments/minneapolis-mn",
+        "luxury-apartments/minneapolis-mn",
+        "cheap-apartments/minneapolis-mn",
+        "student-housing/minneapolis-mn",
+        "short-term-apartments/minneapolis-mn",
+    ]
+    urls.extend(special_searches)
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_urls = []
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            unique_urls.append(url)
+    
+    return unique_urls
+
+# Generate the full search URL list
+SEARCH_LOCATIONS = generate_search_urls()
 
 # Rate limiting settings
 # Normal mode: slower but safer
@@ -129,11 +210,25 @@ def get_random_delay() -> float:
     return base
 
 # User agents to rotate (helps avoid bot detection)
+# Expanded list with more recent browser versions for 2024
 USER_AGENTS = [
+    # Chrome on Mac
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    # Chrome on Windows
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    # Safari on Mac
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    # Firefox
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
+    # Edge
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
 ]
 
 # Output
@@ -684,7 +779,7 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
     
     Args:
         page: Playwright page
-        location: Search location string
+        location: Search location string (can be a neighborhood slug, ZIP code, or filter URL path)
         max_pages: Maximum number of search result pages to scrape
         start_page: Page number to start from (1 = first page, 2 = skip to page 2, etc.)
     
@@ -696,13 +791,20 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
         logger.info(f"Skipping to page {start_page} (to find different buildings)")
     building_urls = set()
     try:
-        # Build search URL - handle different location formats
-        location_slug = location.lower().replace(' ', '-').replace(',', '').replace("'", "")
-        search_url = f"{BASE_URL}/{location_slug}/"
+        # Build search URL - location is already formatted as a URL path segment
+        # Examples: "dinkytown-minneapolis-mn", "55414/min-1000-max-1500/"
+        search_url = f"{BASE_URL}/{location}/"
+        
+        # Clean up double slashes if any
+        search_url = search_url.replace("//", "/").replace("https:/", "https://")
         
         # If starting from a later page, add page number to URL
         if start_page > 1:
-            search_url = f"{BASE_URL}/{location_slug}/{start_page}/"
+            # Insert page number before any trailing filters
+            if search_url.endswith('/'):
+                search_url = search_url[:-1] + f"/{start_page}/"
+            else:
+                search_url = search_url + f"/{start_page}/"
         
         logger.info(f"Navigating to: {search_url}")
 
@@ -710,6 +812,10 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
             try:
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
                 await asyncio.sleep(get_random_delay())
+                
+                # Human-like behavior: scroll down slowly
+                await simulate_human_scrolling(page)
+                
                 # Wait for common result container
                 await page.wait_for_selector('article.placard, .placard', timeout=20000)
                 break
@@ -731,6 +837,10 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
 
         for page_num in range(start_page, start_page + max_pages):
             logger.info(f"Scraping search results page {page_num}")
+            
+            # Human-like behavior: random scroll before extracting
+            await simulate_human_scrolling(page)
+            
             property_links = await page.locator('article.placard a.property-link, a.property-link').all()
             if not property_links:
                 logger.warning("No property links found, trying broader selector")
@@ -754,6 +864,9 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
                     await next_button.first.click()
                     await page.wait_for_load_state("domcontentloaded", timeout=30000)
                     await asyncio.sleep(get_random_delay())
+                    
+                    # Human-like scroll after page load
+                    await simulate_human_scrolling(page)
                 except Exception as e:
                     logger.info(f"Pagination ended: {e}")
                     break
@@ -766,6 +879,25 @@ async def search_apartments(page: Page, location: str, max_pages: int = 10, star
 
     logger.info(f"Search complete. Found {len(building_urls)} total buildings")
     return list(building_urls)
+
+
+async def simulate_human_scrolling(page: Page):
+    """Simulate human-like scrolling to avoid bot detection."""
+    try:
+        # Random scroll pattern
+        scroll_steps = random.randint(2, 5)
+        for _ in range(scroll_steps):
+            scroll_amount = random.randint(200, 600)
+            await page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+            await asyncio.sleep(random.uniform(SCROLL_DELAY_MIN, SCROLL_DELAY_MAX))
+        
+        # Sometimes scroll back up a bit
+        if random.random() < 0.3:
+            scroll_back = random.randint(100, 300)
+            await page.evaluate(f"window.scrollBy(0, -{scroll_back})")
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+    except Exception as e:
+        logger.debug(f"Scroll simulation error (non-fatal): {e}")
 
 
 async def scrape_building(page: Page, url: str) -> List[UnitListing]:
@@ -1326,7 +1458,8 @@ async def main(headless: bool = True, max_search_pages: int = 25, max_buildings:
 async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10, 
                                 max_buildings: int = 50, max_sessions: int = 5,
                                 session_cooldown: int = 300, target_listings: int = 1000,
-                                start_page: int = 1, turbo: bool = False):
+                                start_page: int = 1, turbo: bool = False,
+                                deep_scrape: bool = False):
     """
     Automatically run multiple scraping sessions with cooldowns between them.
     
@@ -1345,6 +1478,7 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
         target_listings: Stop when this many total listings are collected
         start_page: Initial page to start from (will rotate 1, 2, 3...)
         turbo: Use faster delays (higher risk of detection but more data)
+        deep_scrape: Try multiple filter combinations per session for more unique listings
     """
     # If turbo mode, use faster delays
     global PAGE_DELAY_SECONDS
@@ -1359,8 +1493,9 @@ async def auto_restart_scraper(headless: bool = True, max_search_pages: int = 10
     logger.info(f"Cooldown between sessions: {session_cooldown} seconds")
     logger.info(f"Target listings: {target_listings}")
     logger.info(f"Buildings per session: {max_buildings}")
-    logger.info(f"Search locations: {len(SEARCH_LOCATIONS)} neighborhoods/areas")
+    logger.info(f"Search locations: {len(SEARCH_LOCATIONS)} filter combinations")
     logger.info(f"Starting from page: {start_page} (will rotate through pages 1-5)")
+    logger.info(f"Deep scrape mode: {deep_scrape} (multiple filters per session)")
     if turbo:
         logger.info(f"⚡ TURBO: Using {PAGE_DELAY_SECONDS}s delays instead of normal 5s")
     
@@ -1556,6 +1691,11 @@ Examples:
         action='store_true',
         help='🚀 TURBO MODE: Use faster delays for quicker scraping (higher risk of detection). Good when you need data fast.'
     )
+    parser.add_argument(
+        '--deep_scrape',
+        action='store_true',
+        help='🔍 DEEP SCRAPE MODE: Use price/bedroom filters to find more unique listings. Recommended for maximizing data collection.'
+    )
     
     # Direct URL scraping mode
     parser.add_argument(
@@ -1720,7 +1860,8 @@ if __name__ == "__main__":
             session_cooldown=args.session_cooldown,
             target_listings=args.target_listings,
             start_page=args.start_page,
-            turbo=args.turbo
+            turbo=args.turbo,
+            deep_scrape=args.deep_scrape
         ))
     else:
         # Single session mode
