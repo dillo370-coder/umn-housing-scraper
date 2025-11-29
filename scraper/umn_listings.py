@@ -20,6 +20,7 @@ import random
 import re
 import sys
 import time
+import traceback
 from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime
 from math import radians, cos, sin, asin, sqrt
@@ -328,46 +329,284 @@ async def extract_listing_urls(page: Page) -> List[str]:
     urls = set()
     
     try:
-        # Wait for listings to load
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        await asyncio.sleep(2)  # Extra wait for dynamic content
+        # Give page a moment to stabilize after load more clicks
+        await asyncio.sleep(3)
         
-        # Scroll to load all content
+        # Scroll to ensure all lazy-loaded content is visible
         await simulate_human_scrolling(page)
+        await asyncio.sleep(2)
+        
+        # Get all links on the page first for debugging
+        all_links = await page.query_selector_all('a')
+        logger.info(f"Total links found on page: {len(all_links)}")
+        
+        # Log a sample of hrefs for debugging
+        sample_hrefs = []
+        for link in all_links[:20]:
+            try:
+                href = await link.get_attribute('href')
+                if href:
+                    sample_hrefs.append(href)
+            except:
+                pass
+        logger.debug(f"Sample hrefs: {sample_hrefs}")
         
         # Try multiple selectors for listing links
+        # Rent College Pads uses various card/listing structures
         selectors = [
-            'a[href*="/listing/"]',
+            'a[href*="/listing/"]',  # Direct listing links
+            'a[href*="listings.umn.edu/listing/"]',  # Full URL listing links
             '.listing-card a',
-            '.property-card a',
+            '.property-card a', 
             'a.listing-link',
             '[data-listing-id] a',
             '.search-results a',
             'article a',
             '.card a',
+            '.MuiCard-root a',  # Material UI cards
+            '[class*="listing"] a',  # Any class containing "listing"
+            '[class*="property"] a',  # Any class containing "property"
+            '[class*="card"] a',  # Any class containing "card"
+            'div[class*="List"] a',  # List containers
         ]
         
         for selector in selectors:
             try:
                 links = await page.query_selector_all(selector)
+                logger.debug(f"Selector '{selector}' found {len(links)} elements")
                 for link in links:
                     href = await link.get_attribute('href')
                     if href:
                         # Make absolute URL if needed
                         if href.startswith('/'):
                             href = BASE_URL + href
-                        # Only include listing URLs
-                        if '/listing/' in href and href.startswith(BASE_URL):
-                            urls.add(href)
-            except Exception:
+                        # Only include listing URLs (check for listing path pattern)
+                        if '/listing/' in href:
+                            # Clean the URL
+                            if href.startswith('http'):
+                                urls.add(href)
+                            elif href.startswith('/'):
+                                urls.add(BASE_URL + href)
+            except Exception as e:
+                logger.debug(f"Selector '{selector}' error: {e}")
                 continue
+        
+        # Also try to find listing URLs in onclick handlers or data attributes
+        try:
+            all_elements = await page.query_selector_all('[onclick*="listing"], [data-href*="listing"], [data-url*="listing"]')
+            for el in all_elements:
+                onclick = await el.get_attribute('onclick') or ''
+                data_href = await el.get_attribute('data-href') or ''
+                data_url = await el.get_attribute('data-url') or ''
+                
+                for attr in [onclick, data_href, data_url]:
+                    if '/listing/' in attr:
+                        # Extract URL from attribute
+                        url_match = re.search(r'(/listing/[^\s\'"]+)', attr)
+                        if url_match:
+                            urls.add(BASE_URL + url_match.group(1))
+        except Exception as e:
+            logger.debug(f"Data attribute search error: {e}")
         
         logger.info(f"Found {len(urls)} listing URLs")
         
+        # Log sample URLs for verification
+        if urls:
+            sample = list(urls)[:3]
+            logger.info(f"Sample listing URLs: {sample}")
+        
     except Exception as e:
         logger.error(f"Error extracting listing URLs: {e}")
+        logger.debug(traceback.format_exc())
     
     return list(urls)
+
+
+async def scrape_listings_from_cards(page: Page) -> List[UnitListing]:
+    """
+    Scrape listing data directly from the listing cards on the main page.
+    This is a fallback when individual listing URLs cannot be extracted.
+    
+    Rent College Pads typically shows:
+    - Property name/title
+    - Address  
+    - Price
+    - Beds/baths
+    - Available date
+    """
+    listings = []
+    
+    try:
+        logger.info("Attempting to scrape listings directly from page cards...")
+        
+        # Wait for content to settle
+        await asyncio.sleep(2)
+        
+        # Common card selectors for Rent College Pads sites
+        card_selectors = [
+            '[class*="listing-card"]',
+            '[class*="property-card"]', 
+            '[class*="ListingCard"]',
+            '[class*="PropertyCard"]',
+            '[data-listing-id]',
+            '[data-property-id]',
+            'article[class*="listing"]',
+            'article[class*="property"]',
+            '.MuiCard-root',
+            '[class*="card"][class*="listing"]',
+            'div[class*="result"]',
+            # Generic card patterns
+            '[class*="Card"][class*="List"]',
+            '[class*="card-item"]',
+        ]
+        
+        cards = []
+        for selector in card_selectors:
+            try:
+                found = await page.query_selector_all(selector)
+                if found and len(found) > len(cards):
+                    cards = found
+                    logger.debug(f"Card selector '{selector}' found {len(found)} cards")
+            except:
+                continue
+        
+        logger.info(f"Found {len(cards)} listing cards to scrape")
+        
+        for idx, card in enumerate(cards):
+            try:
+                # Generate a unique ID based on card index
+                listing_id = f"umn_card_{idx}_{int(time.time())}"
+                
+                listing = UnitListing(
+                    listing_id=listing_id,
+                    building_name="",
+                    full_address="",
+                    source_url=LISTING_PAGE,
+                    is_student_branded=True,
+                )
+                
+                # Get all text from the card
+                card_text = await card.text_content() or ""
+                card_html = await card.inner_html() or ""
+                
+                # Extract property name - usually in a heading or prominent text
+                name_selectors = ['h2', 'h3', 'h4', '[class*="title"]', '[class*="name"]', '[class*="Title"]', '[class*="Name"]']
+                for sel in name_selectors:
+                    try:
+                        el = await card.query_selector(sel)
+                        if el:
+                            text = (await el.text_content() or "").strip()
+                            if text and len(text) > 2:
+                                listing.building_name = text
+                                break
+                    except:
+                        continue
+                
+                # Extract address - look for address-like patterns
+                address_selectors = ['[class*="address"]', '[class*="Address"]', '[class*="location"]', '[class*="Location"]', 'address']
+                for sel in address_selectors:
+                    try:
+                        el = await card.query_selector(sel)
+                        if el:
+                            text = (await el.text_content() or "").strip()
+                            if text:
+                                listing.full_address = text
+                                # Parse address components
+                                parts = text.split(',')
+                                if len(parts) >= 1:
+                                    listing.street = parts[0].strip()
+                                if len(parts) >= 2:
+                                    listing.city = parts[1].strip()
+                                if len(parts) >= 3:
+                                    state_zip = parts[2].strip().split()
+                                    if state_zip:
+                                        listing.state = state_zip[0]
+                                    if len(state_zip) >= 2:
+                                        listing.zip = state_zip[1]
+                                break
+                    except:
+                        continue
+                
+                # Extract price - look for dollar amounts
+                price_selectors = ['[class*="price"]', '[class*="Price"]', '[class*="rent"]', '[class*="Rent"]', '[class*="cost"]']
+                for sel in price_selectors:
+                    try:
+                        el = await card.query_selector(sel)
+                        if el:
+                            text = (await el.text_content() or "").strip()
+                            if text:
+                                listing.rent_raw = text
+                                listing.rent_min, listing.rent_max, listing.price_type = parse_rent(text)
+                                listing.is_per_bed = listing.price_type == "per_bed"
+                                break
+                    except:
+                        continue
+                
+                # Also try to find price from card text using regex
+                if not listing.rent_raw:
+                    price_match = re.search(r'\$[\d,]+(?:\s*[-–]\s*\$[\d,]+)?(?:\s*/\s*(?:mo|month|bed))?', card_text, re.IGNORECASE)
+                    if price_match:
+                        listing.rent_raw = price_match.group(0)
+                        listing.rent_min, listing.rent_max, listing.price_type = parse_rent(listing.rent_raw)
+                        listing.is_per_bed = listing.price_type == "per_bed"
+                
+                # Extract beds/baths
+                bed_bath_selectors = ['[class*="bed"]', '[class*="Bed"]', '[class*="bath"]', '[class*="Bath"]', '[class*="detail"]']
+                for sel in bed_bath_selectors:
+                    try:
+                        el = await card.query_selector(sel)
+                        if el:
+                            text = (await el.text_content() or "").strip()
+                            if text:
+                                beds, baths = parse_beds_baths(text)
+                                if beds is not None:
+                                    listing.beds = beds
+                                if baths is not None:
+                                    listing.baths = baths
+                                break
+                    except:
+                        continue
+                
+                # Try to find beds/baths from card text
+                if listing.beds is None:
+                    beds, baths = parse_beds_baths(card_text)
+                    if beds is not None:
+                        listing.beds = beds
+                    if baths is not None:
+                        listing.baths = baths
+                
+                # Extract listing URL from card if available
+                try:
+                    link = await card.query_selector('a[href*="listing"]')
+                    if link:
+                        href = await link.get_attribute('href')
+                        if href:
+                            if href.startswith('/'):
+                                href = BASE_URL + href
+                            listing.source_url = href
+                            # Update listing_id from URL
+                            url_parts = [p for p in href.rstrip('/').split('/') if p]
+                            if url_parts:
+                                listing.listing_id = f"umn_{url_parts[-1]}"
+                except:
+                    pass
+                
+                # Only add listings that have at least a name or address
+                if listing.building_name or listing.full_address:
+                    listings.append(listing)
+                    logger.debug(f"Scraped card {idx}: {listing.building_name} - {listing.rent_raw}")
+            
+            except Exception as e:
+                logger.debug(f"Error scraping card {idx}: {e}")
+                continue
+        
+        logger.info(f"Successfully scraped {len(listings)} listings from cards")
+        
+    except Exception as e:
+        logger.error(f"Error in scrape_listings_from_cards: {e}")
+        logger.debug(traceback.format_exc())
+    
+    return listings
 
 
 async def scrape_listing(page: Page, url: str) -> Optional[UnitListing]:
@@ -887,20 +1126,35 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
                 listing_urls = listing_urls[:max_listings]
                 logger.info(f"Limited to {max_listings} listings")
             
-            # Scrape each listing
-            for idx, url in enumerate(listing_urls, 1):
-                logger.info(f"Processing listing {idx}/{len(listing_urls)}")
-                try:
-                    unit = await scrape_listing(page, url)
-                    if unit:
-                        all_units.append(unit)
-                        logger.info(f"Total units collected: {len(all_units)}")
-                except Exception as e:
-                    logger.error(f"Failed to scrape {url}: {e}")
+            # If we found URLs, scrape each listing individually
+            if listing_urls:
+                # Scrape each listing
+                for idx, url in enumerate(listing_urls, 1):
+                    logger.info(f"Processing listing {idx}/{len(listing_urls)}")
+                    try:
+                        unit = await scrape_listing(page, url)
+                        if unit:
+                            all_units.append(unit)
+                            logger.info(f"Total units collected: {len(all_units)}")
+                    except Exception as e:
+                        logger.error(f"Failed to scrape {url}: {e}")
+                    
+                    # Random delay between listings
+                    delay = get_random_delay()
+                    await asyncio.sleep(delay)
+            else:
+                # Fallback: scrape listings directly from cards on main page
+                logger.warning("No listing URLs found. Attempting to scrape from listing cards directly...")
+                card_listings = await scrape_listings_from_cards(page)
                 
-                # Random delay between listings
-                delay = get_random_delay()
-                await asyncio.sleep(delay)
+                if card_listings:
+                    logger.info(f"Successfully extracted {len(card_listings)} listings from cards")
+                    if max_listings:
+                        card_listings = card_listings[:max_listings]
+                    all_units.extend(card_listings)
+                else:
+                    logger.warning("Could not extract listings from cards either.")
+                    logger.warning("The page structure may have changed. Please report this issue.")
 
         finally:
             await browser.close()
