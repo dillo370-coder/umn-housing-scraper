@@ -4,12 +4,24 @@ UMN Listings (listings.umn.edu) Web Scraper
 Scrapes the official University of Minnesota Off-Campus Housing Marketplace
 (powered by Rent College Pads) for student housing listings.
 
-IMPORTANT: This site is powered by Rent College Pads and may have bot protection.
-The scraper uses enhanced stealth settings to work around these restrictions.
+SITE STRUCTURE (as documented):
+- Home page: https://listings.umn.edu/listing
+- Heavy JavaScript - requires headless browser (Playwright)
+- Filters at top: Beds, Baths, Price (Per Unit vs. Per Person)
+- Neighborhood tabs: Dinkytown, Marcy-Holmes, Como, Prospect Park
+- Listings grid: Cards displayed as <div>, no traditional <a> links
+  - Clicking a card triggers JavaScript to load property details
+  - Cards show: image, name, price range, bed range, address, availability, walk time
+- Property modal: URL becomes ?property=<id>
+  - Shows: property name, full address, contact info (phone/email)
+  - Unit table: Name, Beds, Baths, Price From, Sq.Ft, Available, Tour
+- Infinite scroll: Need to scroll to load more listings
+- No lat/lon exposed: Must geocode addresses ourselves
 
 Usage:
   python3 -m scraper.umn_listings --headless=False  # test run with visible browser
   python3 -m scraper.umn_listings --headless=True   # full headless run
+  python3 -m scraper.umn_listings --neighborhood=dinkytown  # filter by neighborhood
 """
 import argparse
 import asyncio
@@ -25,6 +37,7 @@ from datetime import datetime
 from math import radians, cos, sin, asin, sqrt
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Set
+from urllib.parse import urljoin, urlparse, parse_qs
 
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 import requests
@@ -41,19 +54,30 @@ SEARCH_RADIUS_KM = 10.0  # 10 km radius
 BASE_URL = "https://listings.umn.edu"
 LISTING_PAGE = f"{BASE_URL}/listing"
 
+# Neighborhood tabs available on the site
+NEIGHBORHOODS = [
+    "dinkytown",
+    "marcy-holmes",
+    "como",
+    "prospect-park",
+]
+
 # Rate limiting settings - more conservative for university site
 PAGE_DELAY_SECONDS = 4.0
 PAGE_DELAY_VARIANCE = 3.0
+MODAL_WAIT_SECONDS = 2.0  # Wait for modal to render
 GEOCODE_DELAY_SECONDS = 1.0
 
 # Navigation settings
 NAV_TIMEOUT = 90000  # 90 seconds for page load
+MODAL_TIMEOUT = 15000  # 15 seconds for modal to appear
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 5
 
-# Scroll settings
+# Scroll settings for infinite scroll
 SCROLL_DELAY_MIN = 0.8
 SCROLL_DELAY_MAX = 2.0
+MAX_SCROLL_ATTEMPTS = 50  # Maximum scroll iterations to find all listings
 
 # User agents - more variety helps avoid detection
 USER_AGENTS = [
@@ -98,7 +122,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class UnitListing:
-    listing_id: str
+    """Data structure matching the CSV columns specified in the PDF notes."""
+    listing_id: str  # property ID from the URL (?property=<id>)
     building_name: str
     full_address: str
     street: str = ""
@@ -107,17 +132,17 @@ class UnitListing:
     zip: str = ""
     lat: Optional[float] = None
     lon: Optional[float] = None
-    dist_to_campus_km: Optional[float] = None
+    dist_to_campus_km: Optional[float] = None  # Calculated via haversine from geocoded address
 
-    unit_label: str = ""
-    beds: Optional[float] = None
-    baths: Optional[float] = None
-    sqft: Optional[int] = None
-    rent_raw: str = ""
-    rent_min: Optional[float] = None
-    rent_max: Optional[float] = None
-    price_type: str = "unknown"
-    is_per_bed: Optional[bool] = None
+    unit_label: str = ""  # Unit identifier from unit table "Name" column
+    beds: Optional[float] = None  # From unit table "Beds" column
+    baths: Optional[float] = None  # From unit table "Baths" column
+    sqft: Optional[int] = None  # From unit table "Sq.Ft" column (size_sqft)
+    rent_raw: str = ""  # Raw price text from unit table "Price From" column
+    rent_min: Optional[float] = None  # Parsed from rent_raw (same as rent_raw for single price)
+    rent_max: Optional[float] = None  # Parsed from rent_raw (same as rent_raw for single price)
+    price_type: str = "unknown"  # "per_bed" or "per_unit"
+    is_per_bed: Optional[bool] = None  # Determined from price filter or text
     is_shared_bedroom: Optional[bool] = None
 
     year_built: Optional[int] = None
@@ -141,13 +166,21 @@ class UnitListing:
     pets_allowed: Optional[bool] = None
     is_student_branded: Optional[bool] = None
     
-    # UMN-specific fields
-    available_date: str = ""
-    lease_term: str = ""
+    # UMN-specific fields from the modal
+    available_date: str = ""  # From unit table "Available" column
+    walk_time_to_campus: str = ""  # "Walk Time To Campus" from card
+    has_virtual_tour: Optional[bool] = None  # From unit table "Tour" column
+    
+    # Contact info from modal
+    landlord_phone: str = ""
+    landlord_email: str = ""
     property_manager: str = ""
-
+    
+    # Metadata
+    neighborhood: str = ""  # Which tab: dinkytown, marcy-holmes, como, prospect-park
+    listing_url: str = ""  # Full URL with ?property=<id>
     scrape_date: str = field(default_factory=lambda: datetime.now().isoformat())
-    source_url: str = ""
+    source_url: str = ""  # Kept for compatibility
 
 
 # ============================================================================
@@ -237,8 +270,43 @@ def parse_beds_baths(text: str) -> tuple:
     return beds, baths
 
 
+def parse_beds(text: str) -> Optional[float]:
+    """Parse bedroom count from text."""
+    if not text:
+        return None
+    text_lower = text.lower().strip()
+    if 'studio' in text_lower:
+        return 0.0
+    match = re.search(r'(\d+(?:\.\d+)?)', text_lower)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def parse_baths(text: str) -> Optional[float]:
+    """Parse bathroom count from text."""
+    if not text:
+        return None
+    match = re.search(r'(\d+(?:\.\d+)?)', text.lower())
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def parse_sqft(text: str) -> Optional[int]:
+    """Parse square footage from text."""
+    if not text:
+        return None
+    # Remove commas and extract number
+    text_clean = text.replace(',', '')
+    match = re.search(r'(\d+)', text_clean)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 # ============================================================================
-# UMN LISTINGS SCRAPER
+# UMN LISTINGS SCRAPER - Handles JavaScript-heavy site with modal-based details
 # ============================================================================
 
 async def simulate_human_scrolling(page: Page):
@@ -246,7 +314,6 @@ async def simulate_human_scrolling(page: Page):
     try:
         # Get page height
         height = await page.evaluate("document.body.scrollHeight")
-        viewport_height = 1080
         
         current_pos = 0
         while current_pos < height:
@@ -256,6 +323,535 @@ async def simulate_human_scrolling(page: Page):
             await asyncio.sleep(random.uniform(SCROLL_DELAY_MIN, SCROLL_DELAY_MAX))
     except Exception as e:
         logger.debug(f"Scroll error: {e}")
+
+
+async def scroll_to_load_all_listings(page: Page) -> int:
+    """
+    Scroll to bottom repeatedly to trigger infinite scroll and load all listings.
+    Returns the number of listing cards found.
+    """
+    previous_count = 0
+    no_change_count = 0
+    
+    for scroll_attempt in range(MAX_SCROLL_ATTEMPTS):
+        # Scroll to bottom
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+        
+        # Count current cards - try multiple selectors
+        card_selectors = [
+            '[data-property-id]',  # Most specific
+            '.listing-card',
+            '.property-card',
+            'div[class*="listing"]',
+            'div[class*="property"]',
+            'article',
+        ]
+        
+        current_count = 0
+        for selector in card_selectors:
+            try:
+                cards = await page.query_selector_all(selector)
+                if cards and len(cards) > current_count:
+                    current_count = len(cards)
+            except Exception:
+                continue
+        
+        logger.debug(f"Scroll {scroll_attempt + 1}: Found {current_count} cards")
+        
+        if current_count == previous_count:
+            no_change_count += 1
+            if no_change_count >= 3:
+                # No new cards after 3 scrolls, we've loaded everything
+                logger.info(f"Finished scrolling. Total cards found: {current_count}")
+                break
+        else:
+            no_change_count = 0
+            previous_count = current_count
+    
+    return previous_count
+
+
+async def click_neighborhood_tab(page: Page, neighborhood: str) -> bool:
+    """
+    Click on a neighborhood tab to filter listings.
+    Neighborhood tabs trigger AJAX calls to update the listings grid.
+    """
+    try:
+        # Try various tab selectors
+        tab_selectors = [
+            f'[data-neighborhood="{neighborhood}"]',
+            f'button:has-text("{neighborhood}")',
+            f'a:has-text("{neighborhood}")',
+            f'[class*="tab"]:has-text("{neighborhood}")',
+            f'div[role="tab"]:has-text("{neighborhood}")',
+        ]
+        
+        for selector in tab_selectors:
+            try:
+                tab = await page.query_selector(selector)
+                if tab:
+                    await tab.click()
+                    await asyncio.sleep(2)  # Wait for AJAX to complete
+                    logger.info(f"Clicked neighborhood tab: {neighborhood}")
+                    return True
+            except Exception:
+                continue
+        
+        logger.warning(f"Could not find tab for neighborhood: {neighborhood}")
+        return False
+    except Exception as e:
+        logger.error(f"Error clicking neighborhood tab: {e}")
+        return False
+
+
+async def get_property_ids_from_cards(page: Page) -> List[str]:
+    """
+    Extract property IDs from listing cards.
+    Cards don't use <a> links - they use JavaScript click handlers.
+    The property ID is used in the URL as ?property=<id>.
+    """
+    property_ids = []
+    
+    try:
+        # Try to find cards with data attributes containing property IDs
+        card_selectors = [
+            '[data-property-id]',
+            '[data-listing-id]',
+            '[data-id]',
+            'div[class*="listing"][id]',
+            'div[class*="property"][id]',
+        ]
+        
+        for selector in card_selectors:
+            try:
+                cards = await page.query_selector_all(selector)
+                for card in cards:
+                    # Try different attribute names for the ID
+                    for attr in ['data-property-id', 'data-listing-id', 'data-id', 'id']:
+                        try:
+                            prop_id = await card.get_attribute(attr)
+                            if prop_id and prop_id not in property_ids:
+                                property_ids.append(prop_id)
+                                break
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+        
+        if not property_ids:
+            # Fallback: try clicking cards and capturing URL changes
+            logger.warning("No property IDs found via data attributes, will try click-based extraction")
+        
+        logger.info(f"Found {len(property_ids)} property IDs from cards")
+        
+    except Exception as e:
+        logger.error(f"Error extracting property IDs: {e}")
+    
+    return property_ids
+
+
+async def click_card_and_get_property_id(page: Page, card_index: int) -> Optional[str]:
+    """
+    Click on a listing card by index and extract the property ID from the URL.
+    The site appends ?property=<id> to the URL when a modal opens.
+    """
+    try:
+        # Get all cards
+        card_selectors = [
+            'div[class*="listing"]:not([class*="grid"])',
+            'div[class*="property"]:not([class*="grid"])',
+            'article',
+            '.card',
+        ]
+        
+        cards = []
+        for selector in card_selectors:
+            try:
+                cards = await page.query_selector_all(selector)
+                if cards and len(cards) > card_index:
+                    break
+            except Exception:
+                continue
+        
+        if not cards or len(cards) <= card_index:
+            return None
+        
+        card = cards[card_index]
+        
+        # Click the card
+        await card.click()
+        await asyncio.sleep(MODAL_WAIT_SECONDS)
+        
+        # Get URL and extract property ID
+        current_url = page.url
+        if '?property=' in current_url or '&property=' in current_url:
+            parsed = urlparse(current_url)
+            params = parse_qs(parsed.query)
+            if 'property' in params:
+                return params['property'][0]
+        
+        return None
+        
+    except Exception as e:
+        logger.debug(f"Error clicking card {card_index}: {e}")
+        return None
+
+
+async def open_property_modal(page: Page, property_id: str) -> bool:
+    """
+    Open the property detail modal by navigating to ?property=<id>.
+    The modal overlay contains full property details.
+    """
+    try:
+        # Construct URL with property parameter
+        target_url = f"{LISTING_PAGE}?property={property_id}"
+        
+        # Navigate to the property modal URL
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+        await asyncio.sleep(MODAL_WAIT_SECONDS)
+        
+        # Wait for modal to appear - try various selectors
+        modal_selectors = [
+            '[class*="modal"]',
+            '[role="dialog"]',
+            '.property-detail',
+            '.property-modal',
+            '[class*="overlay"]',
+            '[class*="detail"]',
+        ]
+        
+        for selector in modal_selectors:
+            try:
+                modal = await page.wait_for_selector(selector, timeout=MODAL_TIMEOUT)
+                if modal:
+                    logger.debug(f"Modal opened for property {property_id}")
+                    return True
+            except PlaywrightTimeout:
+                continue
+            except Exception:
+                continue
+        
+        # Even if we don't find a specific modal selector, the page may have loaded the detail view
+        # Check if we're on the property page
+        if property_id in page.url:
+            logger.debug(f"Property page loaded for {property_id}")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error opening property modal for {property_id}: {e}")
+        return False
+
+
+async def close_property_modal(page: Page) -> bool:
+    """
+    Close the property detail modal so we can click the next card.
+    """
+    try:
+        # Try various close methods
+        close_selectors = [
+            'button[aria-label="Close"]',
+            '[class*="close"]',
+            'button:has-text("×")',
+            'button:has-text("Close")',
+            '.modal-close',
+            '[data-dismiss="modal"]',
+        ]
+        
+        for selector in close_selectors:
+            try:
+                close_btn = await page.query_selector(selector)
+                if close_btn:
+                    await close_btn.click()
+                    await asyncio.sleep(0.5)
+                    return True
+            except Exception:
+                continue
+        
+        # Alternative: press Escape key
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.5)
+        
+        # Alternative: navigate back to listing page without property param
+        if '?property=' in page.url:
+            await page.goto(LISTING_PAGE, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            await asyncio.sleep(1)
+            return True
+        
+        return True
+        
+    except Exception as e:
+        logger.debug(f"Error closing modal: {e}")
+        return False
+
+
+async def extract_property_from_modal(page: Page, property_id: str) -> List[UnitListing]:
+    """
+    Extract property details from the modal/detail view.
+    
+    Modal contains:
+    - Property name & full address (street, city, state, ZIP)
+    - Contact info (phone, email)
+    - Unit table with columns: Name, Beds, Baths, Price From, Sq.Ft, Available, Tour
+    - Bed-range and price-range summary at top
+    """
+    units = []
+    
+    try:
+        # Extract property name
+        building_name = ""
+        name_selectors = ['h1', '.property-name', '.property-title', '[class*="title"]']
+        for sel in name_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el:
+                    text = (await el.text_content() or "").strip()
+                    if text and len(text) < 200:  # Reasonable name length
+                        building_name = text
+                        break
+            except Exception:
+                continue
+        
+        # Extract full address
+        full_address = ""
+        street = ""
+        city = ""
+        state = ""
+        zipcode = ""
+        
+        address_selectors = [
+            '.address', '.property-address', '[class*="address"]',
+            '[itemprop="address"]', '.location'
+        ]
+        for sel in address_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el:
+                    full_address = (await el.text_content() or "").strip()
+                    if full_address:
+                        # Parse address components
+                        parts = full_address.split(',')
+                        if len(parts) >= 1:
+                            street = parts[0].strip()
+                        if len(parts) >= 2:
+                            city = parts[1].strip()
+                        if len(parts) >= 3:
+                            state_zip = parts[2].strip().split()
+                            if len(state_zip) >= 1:
+                                state = state_zip[0]
+                            if len(state_zip) >= 2:
+                                zipcode = state_zip[1]
+                        break
+            except Exception:
+                continue
+        
+        # Extract contact info (phone and email)
+        landlord_phone = ""
+        landlord_email = ""
+        
+        phone_selectors = ['.phone', '[class*="phone"]', 'a[href^="tel:"]', '[itemprop="telephone"]']
+        for sel in phone_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el:
+                    phone_text = await el.get_attribute('href') or await el.text_content()
+                    if phone_text:
+                        phone_text = phone_text.replace('tel:', '').strip()
+                        if re.match(r'[\d\-\(\)\s\+]+', phone_text):
+                            landlord_phone = phone_text
+                            break
+            except Exception:
+                continue
+        
+        email_selectors = ['.email', '[class*="email"]', 'a[href^="mailto:"]', '[itemprop="email"]']
+        for sel in email_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el:
+                    email_text = await el.get_attribute('href') or await el.text_content()
+                    if email_text:
+                        email_text = email_text.replace('mailto:', '').strip()
+                        if '@' in email_text:
+                            landlord_email = email_text
+                            break
+            except Exception:
+                continue
+        
+        # Extract amenities from page content
+        page_text = (await page.content()).lower()
+        amenities = extract_amenities_from_text(page_text)
+        
+        # Extract unit table rows
+        # Table columns: Name, Beds, Baths, Price From, Sq.Ft, Available, Tour
+        table_selectors = [
+            'table',
+            '[class*="unit-table"]',
+            '[class*="floor-plan"]',
+            '[class*="pricing"]',
+        ]
+        
+        rows_found = False
+        for table_sel in table_selectors:
+            try:
+                table = await page.query_selector(table_sel)
+                if not table:
+                    continue
+                
+                # Get all rows
+                rows = await table.query_selector_all('tr')
+                if not rows or len(rows) <= 1:  # Need header + at least one data row
+                    continue
+                
+                rows_found = True
+                
+                for row in rows[1:]:  # Skip header row
+                    try:
+                        cells = await row.query_selector_all('td')
+                        if not cells:
+                            continue
+                        
+                        cell_texts = []
+                        for cell in cells:
+                            text = (await cell.text_content() or "").strip()
+                            cell_texts.append(text)
+                        
+                        # Parse row based on expected columns:
+                        # Name, Beds, Baths, Price From, Sq.Ft, Available, Tour
+                        unit_label = cell_texts[0] if len(cell_texts) > 0 else ""
+                        beds = parse_beds(cell_texts[1]) if len(cell_texts) > 1 else None
+                        baths = parse_baths(cell_texts[2]) if len(cell_texts) > 2 else None
+                        rent_raw = cell_texts[3] if len(cell_texts) > 3 else ""
+                        sqft = parse_sqft(cell_texts[4]) if len(cell_texts) > 4 else None
+                        available_date = cell_texts[5] if len(cell_texts) > 5 else ""
+                        has_tour = "yes" in (cell_texts[6].lower() if len(cell_texts) > 6 else "")
+                        
+                        rent_min, rent_max, price_type = parse_rent(rent_raw)
+                        
+                        unit = UnitListing(
+                            listing_id=f"{property_id}_{unit_label or 'unit'}",
+                            building_name=building_name,
+                            full_address=full_address,
+                            street=street,
+                            city=city,
+                            state=state,
+                            zip=zipcode,
+                            unit_label=unit_label,
+                            beds=beds,
+                            baths=baths,
+                            sqft=sqft,
+                            rent_raw=rent_raw,
+                            rent_min=rent_min,
+                            rent_max=rent_max,
+                            price_type=price_type,
+                            is_per_bed=(price_type == "per_bed"),
+                            available_date=available_date,
+                            has_virtual_tour=has_tour,
+                            landlord_phone=landlord_phone,
+                            landlord_email=landlord_email,
+                            is_student_branded=True,
+                            listing_url=f"{LISTING_PAGE}?property={property_id}",
+                            source_url=f"{LISTING_PAGE}?property={property_id}",
+                            **amenities
+                        )
+                        units.append(unit)
+                        
+                    except Exception as e:
+                        logger.debug(f"Error parsing row: {e}")
+                        continue
+                
+                if units:
+                    break  # Found units, don't try other table selectors
+                    
+            except Exception as e:
+                logger.debug(f"Error with table selector {table_sel}: {e}")
+                continue
+        
+        # If no table found, create a single listing from header info
+        if not rows_found or not units:
+            # Try to get bed/bath/price from summary at top of modal
+            summary_text = ""
+            summary_selectors = [
+                '[class*="summary"]', '[class*="overview"]',
+                '.bed-bath', '.price-range'
+            ]
+            for sel in summary_selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        summary_text += " " + (await el.text_content() or "")
+                except Exception:
+                    continue
+            
+            beds = parse_beds(summary_text) if summary_text else None
+            baths = parse_baths(summary_text) if summary_text else None
+            
+            # Look for price
+            rent_raw = ""
+            price_selectors = ['.price', '[class*="price"]', '[class*="rent"]']
+            for sel in price_selectors:
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        rent_raw = (await el.text_content() or "").strip()
+                        break
+                except Exception:
+                    continue
+            
+            rent_min, rent_max, price_type = parse_rent(rent_raw)
+            
+            unit = UnitListing(
+                listing_id=property_id,
+                building_name=building_name,
+                full_address=full_address,
+                street=street,
+                city=city,
+                state=state,
+                zip=zipcode,
+                beds=beds,
+                baths=baths,
+                rent_raw=rent_raw,
+                rent_min=rent_min,
+                rent_max=rent_max,
+                price_type=price_type,
+                is_per_bed=(price_type == "per_bed"),
+                landlord_phone=landlord_phone,
+                landlord_email=landlord_email,
+                is_student_branded=True,
+                listing_url=f"{LISTING_PAGE}?property={property_id}",
+                source_url=f"{LISTING_PAGE}?property={property_id}",
+                **amenities
+            )
+            units.append(unit)
+        
+        logger.info(f"Extracted {len(units)} units from property {property_id}: {building_name}")
+        
+    except Exception as e:
+        logger.error(f"Error extracting property {property_id}: {e}")
+    
+    return units
+
+
+def extract_amenities_from_text(text: str) -> Dict[str, Optional[bool]]:
+    """Extract amenity flags from page text."""
+    text_lower = text.lower()
+    return {
+        'has_in_unit_laundry': 'in-unit' in text_lower and 'laundry' in text_lower,
+        'has_on_site_laundry': 'on-site laundry' in text_lower or 'laundry room' in text_lower,
+        'has_dishwasher': 'dishwasher' in text_lower,
+        'has_ac': 'air condition' in text_lower or ' a/c' in text_lower or 'central air' in text_lower,
+        'has_heat_included': 'heat included' in text_lower,
+        'has_water_included': 'water included' in text_lower,
+        'has_internet_included': 'internet included' in text_lower or 'wifi included' in text_lower,
+        'is_furnished': 'furnished' in text_lower and 'unfurnished' not in text_lower,
+        'has_gym': 'gym' in text_lower or 'fitness' in text_lower,
+        'has_pool': 'pool' in text_lower,
+        'has_rooftop_or_clubroom': 'rooftop' in text_lower or 'clubhouse' in text_lower or 'club room' in text_lower,
+        'has_parking_available': 'parking' in text_lower,
+        'has_garage': 'garage' in text_lower,
+        'pets_allowed': 'pet friendly' in text_lower or 'pets allowed' in text_lower,
+    }
 
 
 async def extract_listing_urls(page: Page) -> List[str]:
@@ -589,13 +1185,22 @@ def merge_and_export(new_units: List[UnitListing], existing: Dict[str, Any], out
         logger.info(f"Merged {len(existing)} total listings to {output_path}")
 
 
-async def main(headless: bool = True, max_listings: int = None) -> int:
+async def main(headless: bool = True, max_listings: int = None, neighborhood: str = None) -> int:
     """
     Main scraping function for listings.umn.edu.
+    
+    Based on PDF notes:
+    - Site is JavaScript-heavy, uses headless browser (Playwright)
+    - Listing cards don't use <a> links; clicking triggers JS to open modal
+    - Property modal URL: ?property=<id>
+    - Modal contains unit table with columns: Name, Beds, Baths, Price From, Sq.Ft, Available, Tour
+    - Need infinite scroll to load all cards
+    - No lat/lon from site; must geocode addresses ourselves
     
     Args:
         headless: Run browser in headless mode
         max_listings: Max listings to scrape (None = unlimited)
+        neighborhood: Filter by neighborhood tab (dinkytown, marcy-holmes, como, prospect-park)
     
     Returns:
         Number of units scraped in this session
@@ -607,17 +1212,18 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
     logger.info(f"Search radius: {SEARCH_RADIUS_KM} km from UMN campus")
     logger.info(f"Headless mode: {headless}")
     logger.info(f"Max listings: {max_listings if max_listings else 'unlimited'}")
+    if neighborhood:
+        logger.info(f"Neighborhood filter: {neighborhood}")
     logger.info(f"Output file: {OUTPUT_CSV}")
     
     # Recommend non-headless for this site
     if headless:
-        logger.warning("NOTE: listings.umn.edu may block headless browsers.")
+        logger.warning("NOTE: listings.umn.edu uses heavy JavaScript.")
         logger.warning("If scraping fails, try with --headless=False")
 
     all_units: List[UnitListing] = []
 
     async with async_playwright() as p:
-        # Use Firefox which is often better at avoiding detection
         selected_user_agent = random.choice(USER_AGENTS)
         logger.info(f"Using user agent: {selected_user_agent[:50]}...")
         
@@ -678,7 +1284,6 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
             for attempt in range(RETRY_ATTEMPTS):
                 try:
                     logger.info(f"Navigation attempt {attempt + 1}/{RETRY_ATTEMPTS}...")
-                    # Use 'load' first for initial page, more reliable
                     await page.goto(LISTING_PAGE, wait_until="load", timeout=NAV_TIMEOUT)
                     navigation_success = True
                     break
@@ -696,7 +1301,6 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
             if not navigation_success:
                 logger.error("All navigation attempts failed.")
                 logger.error("Please check your internet connection and that listings.umn.edu is accessible.")
-                logger.error("If you're on a university network, you may need to use VPN or connect from a different network.")
                 return 0
             
             # Wait for page to stabilize
@@ -708,48 +1312,76 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
                 logger.error("Page content seems too short - may not have loaded correctly")
                 logger.info(f"Page content length: {len(page_content)}")
             
-            # Check for common error pages
             page_title = await page.title()
             logger.info(f"Page title: {page_title}")
             
-            # Try to load all listings by clicking "Load More" multiple times
-            load_attempts = 0
-            max_load_attempts = 20  # Limit to prevent infinite loop
-            while load_attempts < max_load_attempts:
-                if await load_more_listings(page):
-                    load_attempts += 1
-                    logger.info(f"Loaded more listings (attempt {load_attempts})")
-                else:
-                    break
+            # Click neighborhood tab if specified
+            if neighborhood:
+                await click_neighborhood_tab(page, neighborhood)
+                await asyncio.sleep(2)
             
-            # Extract all listing URLs
-            listing_urls = await extract_listing_urls(page)
-            logger.info(f"Found {len(listing_urls)} listings to scrape")
+            # Scroll to load all listings (infinite scroll)
+            logger.info("Loading all listings via infinite scroll...")
+            total_cards = await scroll_to_load_all_listings(page)
+            logger.info(f"Finished loading. Total cards visible: {total_cards}")
+            
+            # Get property IDs from cards
+            property_ids = await get_property_ids_from_cards(page)
+            
+            # If no IDs found via data attributes, try click-based extraction
+            if not property_ids:
+                logger.info("No property IDs from data attributes. Trying click-based extraction...")
+                # Try clicking cards to get property IDs
+                for i in range(min(total_cards, max_listings or 100)):
+                    prop_id = await click_card_and_get_property_id(page, i)
+                    if prop_id and prop_id not in property_ids:
+                        property_ids.append(prop_id)
+                    await close_property_modal(page)
+                    await asyncio.sleep(0.5)
+            
+            logger.info(f"Found {len(property_ids)} properties to scrape")
             
             if max_listings:
-                listing_urls = listing_urls[:max_listings]
+                property_ids = property_ids[:max_listings]
                 logger.info(f"Limited to {max_listings} listings")
             
-            # Scrape each listing
-            for idx, url in enumerate(listing_urls, 1):
-                logger.info(f"Processing listing {idx}/{len(listing_urls)}")
+            # Scrape each property by opening its modal
+            for idx, prop_id in enumerate(property_ids, 1):
+                logger.info(f"Processing property {idx}/{len(property_ids)}: {prop_id}")
                 try:
-                    unit = await scrape_listing(page, url)
-                    if unit:
-                        all_units.append(unit)
+                    # Open the property modal
+                    if await open_property_modal(page, prop_id):
+                        # Wait for modal to fully render
+                        await asyncio.sleep(MODAL_WAIT_SECONDS)
+                        
+                        # Extract data from modal
+                        units = await extract_property_from_modal(page, prop_id)
+                        
+                        # Add neighborhood info if filtering
+                        if neighborhood:
+                            for unit in units:
+                                unit.neighborhood = neighborhood
+                        
+                        all_units.extend(units)
                         logger.info(f"Total units collected: {len(all_units)}")
+                        
+                        # Close modal before processing next property
+                        await close_property_modal(page)
+                    else:
+                        logger.warning(f"Could not open modal for property {prop_id}")
+                        
                 except Exception as e:
-                    logger.error(f"Failed to scrape {url}: {e}")
+                    logger.error(f"Failed to scrape property {prop_id}: {e}")
                 
-                # Random delay between listings
+                # Random delay between properties to avoid detection
                 delay = get_random_delay()
                 await asyncio.sleep(delay)
 
         finally:
             await browser.close()
 
-    # Geocode and filter
-    logger.info("Geocoding and filtering listings...")
+    # Geocode and filter (site doesn't provide lat/lon)
+    logger.info("Geocoding addresses and filtering by distance...")
     filtered_units = geocode_and_filter_units(all_units)
     
     # Export session data
@@ -777,6 +1409,15 @@ def parse_args():
         description='UMN Listings (listings.umn.edu) Web Scraper',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Site Structure (from PDF documentation):
+  - Heavy JavaScript site - requires headless browser
+  - Listing cards: Displayed as <div>, no <a> links (click triggers JS)
+  - Property modal: ?property=<id> URL pattern
+  - Unit table columns: Name, Beds, Baths, Price From, Sq.Ft, Available, Tour
+  - Neighborhood tabs: dinkytown, marcy-holmes, como, prospect-park
+  - Infinite scroll to load all listings
+  - No lat/lon exposed - addresses are geocoded
+
 Examples:
   # Test run (visible browser)
   python3 -m scraper.umn_listings --headless=False
@@ -786,6 +1427,12 @@ Examples:
 
   # Limit number of listings
   python3 -m scraper.umn_listings --headless=False --max_listings=10
+  
+  # Filter by neighborhood
+  python3 -m scraper.umn_listings --neighborhood=dinkytown
+  
+  # Scrape all neighborhoods
+  python3 -m scraper.umn_listings --all_neighborhoods
         """
     )
 
@@ -810,15 +1457,52 @@ Examples:
         '--max_listings',
         type=int,
         default=None,
-        help='Maximum number of listings to scrape. Default: unlimited'
+        help='Maximum number of listings to scrape per neighborhood. Default: unlimited'
+    )
+    parser.add_argument(
+        '--neighborhood',
+        type=str,
+        choices=NEIGHBORHOODS,
+        default=None,
+        help=f'Filter by neighborhood tab. Options: {", ".join(NEIGHBORHOODS)}'
+    )
+    parser.add_argument(
+        '--all_neighborhoods',
+        action='store_true',
+        help='Scrape all neighborhoods one by one'
     )
     
     return parser.parse_args()
 
 
+async def scrape_all_neighborhoods(headless: bool = True, max_listings: int = None) -> int:
+    """Scrape all neighborhoods sequentially."""
+    total_units = 0
+    for neighborhood in NEIGHBORHOODS:
+        logger.info(f"\n{'='*80}")
+        logger.info(f"SCRAPING NEIGHBORHOOD: {neighborhood.upper()}")
+        logger.info(f"{'='*80}\n")
+        units = await main(
+            headless=headless,
+            max_listings=max_listings,
+            neighborhood=neighborhood
+        )
+        total_units += units
+        await asyncio.sleep(get_random_delay())  # Delay between neighborhoods
+    return total_units
+
+
 if __name__ == "__main__":
     args = parse_args()
-    asyncio.run(main(
-        headless=args.headless,
-        max_listings=args.max_listings
-    ))
+    
+    if args.all_neighborhoods:
+        asyncio.run(scrape_all_neighborhoods(
+            headless=args.headless,
+            max_listings=args.max_listings
+        ))
+    else:
+        asyncio.run(main(
+            headless=args.headless,
+            max_listings=args.max_listings,
+            neighborhood=args.neighborhood
+        ))
