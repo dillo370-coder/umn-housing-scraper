@@ -251,25 +251,6 @@ def parse_rent(rent_text: str) -> tuple:
         return min(numbers), max(numbers), price_type
 
 
-def parse_beds_baths(text: str) -> tuple:
-    """Parse bedroom/bathroom text."""
-    beds, baths = None, None
-    
-    # Look for beds
-    bed_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:bed|br|bedroom)', text.lower())
-    if bed_match:
-        beds = float(bed_match.group(1))
-    elif 'studio' in text.lower():
-        beds = 0
-    
-    # Look for baths
-    bath_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:bath|ba|bathroom)', text.lower())
-    if bath_match:
-        baths = float(bath_match.group(1))
-    
-    return beds, baths
-
-
 def parse_beds(text: str) -> Optional[float]:
     """Parse bedroom count from text."""
     if not text:
@@ -378,21 +359,47 @@ async def click_neighborhood_tab(page: Page, neighborhood: str) -> bool:
     Neighborhood tabs trigger AJAX calls to update the listings grid.
     """
     try:
-        # Try various tab selectors
-        tab_selectors = [
-            f'[data-neighborhood="{neighborhood}"]',
-            f'button:has-text("{neighborhood}")',
-            f'a:has-text("{neighborhood}")',
-            f'[class*="tab"]:has-text("{neighborhood}")',
-            f'div[role="tab"]:has-text("{neighborhood}")',
-        ]
+        # Normalize neighborhood name for display text matching
+        neighborhood_display = neighborhood.replace('-', ' ').title()
         
-        for selector in tab_selectors:
+        # Try data attribute selector first (most reliable)
+        tab = await page.query_selector(f'[data-neighborhood="{neighborhood}"]')
+        if tab:
+            await tab.click()
+            await asyncio.sleep(2)
+            logger.info(f"Clicked neighborhood tab: {neighborhood}")
+            return True
+        
+        # Try using Playwright's get_by_role and get_by_text for better reliability
+        try:
+            tab = page.get_by_role("tab", name=re.compile(neighborhood_display, re.IGNORECASE))
+            if await tab.count() > 0:
+                await tab.first.click()
+                await asyncio.sleep(2)
+                logger.info(f"Clicked neighborhood tab: {neighborhood}")
+                return True
+        except Exception:
+            pass
+        
+        # Try using get_by_text
+        try:
+            tab = page.get_by_text(re.compile(neighborhood_display, re.IGNORECASE))
+            if await tab.count() > 0:
+                await tab.first.click()
+                await asyncio.sleep(2)
+                logger.info(f"Clicked neighborhood tab: {neighborhood}")
+                return True
+        except Exception:
+            pass
+        
+        # Fallback: Search all clickable elements by text content
+        clickables = await page.query_selector_all('button, a, [role="tab"], [class*="tab"]')
+        for el in clickables:
             try:
-                tab = await page.query_selector(selector)
-                if tab:
-                    await tab.click()
-                    await asyncio.sleep(2)  # Wait for AJAX to complete
+                text = (await el.text_content() or "").lower()
+                if neighborhood.replace('-', ' ') in text or neighborhood.replace('-', '') in text:
+                    await el.click()
+                    await asyncio.sleep(2)
                     logger.info(f"Clicked neighborhood tab: {neighborhood}")
                     return True
             except Exception:
@@ -550,6 +557,8 @@ async def close_property_modal(page: Page) -> bool:
     Close the property detail modal so we can click the next card.
     """
     try:
+        original_url = page.url
+        
         # Try various close methods
         close_selectors = [
             'button[aria-label="Close"]',
@@ -566,19 +575,32 @@ async def close_property_modal(page: Page) -> bool:
                 if close_btn:
                     await close_btn.click()
                     await asyncio.sleep(0.5)
-                    return True
+                    # Check if we're back to the listing page
+                    if '?property=' not in page.url:
+                        return True
             except Exception:
                 continue
         
         # Alternative: press Escape key
         await page.keyboard.press("Escape")
         await asyncio.sleep(0.5)
+        if '?property=' not in page.url:
+            return True
         
         # Alternative: navigate back to listing page without property param
         if '?property=' in page.url:
-            await page.goto(LISTING_PAGE, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
-            await asyncio.sleep(1)
-            return True
+            try:
+                await page.goto(LISTING_PAGE, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+                await asyncio.sleep(1)
+                # Verify navigation was successful
+                if page.url.startswith(BASE_URL) and '?property=' not in page.url:
+                    return True
+                else:
+                    logger.warning("Navigation away from modal may have failed")
+                    return False
+            except Exception as nav_error:
+                logger.warning(f"Navigation error while closing modal: {nav_error}")
+                return False
         
         return True
         
@@ -725,7 +747,12 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
                         rent_raw = cell_texts[3] if len(cell_texts) > 3 else ""
                         sqft = parse_sqft(cell_texts[4]) if len(cell_texts) > 4 else None
                         available_date = cell_texts[5] if len(cell_texts) > 5 else ""
-                        has_tour = "yes" in (cell_texts[6].lower() if len(cell_texts) > 6 else "")
+                        
+                        # Parse tour availability - check for various positive indicators
+                        tour_text = cell_texts[6].lower() if len(cell_texts) > 6 else ""
+                        has_tour = any(indicator in tour_text for indicator in [
+                            'yes', 'available', 'virtual', 'tour', '✓', '✔', 'true', '1'
+                        ]) if tour_text else False
                         
                         rent_min, rent_max, price_type = parse_rent(rent_raw)
                         
@@ -852,246 +879,6 @@ def extract_amenities_from_text(text: str) -> Dict[str, Optional[bool]]:
         'has_garage': 'garage' in text_lower,
         'pets_allowed': 'pet friendly' in text_lower or 'pets allowed' in text_lower,
     }
-
-
-async def extract_listing_urls(page: Page) -> List[str]:
-    """
-    Extract listing URLs from the UMN listings page.
-    
-    The listings.umn.edu site is powered by Rent College Pads and displays
-    listings in a grid/list format with clickable cards.
-    """
-    urls = set()
-    
-    try:
-        # Wait for listings to load
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        await asyncio.sleep(2)  # Extra wait for dynamic content
-        
-        # Scroll to load all content
-        await simulate_human_scrolling(page)
-        
-        # Try multiple selectors for listing links
-        selectors = [
-            'a[href*="/listing/"]',
-            '.listing-card a',
-            '.property-card a',
-            'a.listing-link',
-            '[data-listing-id] a',
-            '.search-results a',
-            'article a',
-            '.card a',
-        ]
-        
-        for selector in selectors:
-            try:
-                links = await page.query_selector_all(selector)
-                for link in links:
-                    href = await link.get_attribute('href')
-                    if href:
-                        # Make absolute URL if needed
-                        if href.startswith('/'):
-                            href = BASE_URL + href
-                        # Only include listing URLs
-                        if '/listing/' in href and href.startswith(BASE_URL):
-                            urls.add(href)
-            except Exception:
-                continue
-        
-        logger.info(f"Found {len(urls)} listing URLs")
-        
-    except Exception as e:
-        logger.error(f"Error extracting listing URLs: {e}")
-    
-    return list(urls)
-
-
-async def scrape_listing(page: Page, url: str) -> Optional[UnitListing]:
-    """Scrape a single listing from listings.umn.edu."""
-    logger.info(f"Scraping listing: {url}")
-    
-    try:
-        await page.goto(url, wait_until="networkidle", timeout=30000)
-        await asyncio.sleep(2)
-        
-        # Check for errors
-        content = await page.content()
-        if 'Page not found' in content or '404' in content:
-            logger.warning(f"Listing not found: {url}")
-            return None
-        
-        # Generate listing ID from URL (handle trailing slash)
-        url_parts = [part for part in url.rstrip('/').split('/') if part]
-        listing_id = f"umn_{url_parts[-1]}" if url_parts else f"umn_{hash(url)}"
-        
-        # Try to extract listing data
-        listing = UnitListing(
-            listing_id=listing_id,
-            building_name="",
-            full_address="",
-            source_url=url,
-            is_student_branded=True,  # UMN listings are student-focused
-        )
-        
-        # Extract property name
-        name_selectors = [
-            'h1.property-name', 'h1.listing-title', 'h1',
-            '.property-name', '.listing-name', '.title'
-        ]
-        for sel in name_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    listing.building_name = (await el.text_content()).strip()
-                    break
-            except Exception:
-                continue
-        
-        # Extract address
-        address_selectors = [
-            '.address', '.property-address', '.listing-address',
-            '[data-address]', '.location'
-        ]
-        for sel in address_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    listing.full_address = (await el.text_content()).strip()
-                    # Parse address components
-                    parts = listing.full_address.split(',')
-                    if len(parts) >= 1:
-                        listing.street = parts[0].strip()
-                    if len(parts) >= 2:
-                        listing.city = parts[1].strip()
-                    if len(parts) >= 3:
-                        state_zip = parts[2].strip().split()
-                        if len(state_zip) >= 1:
-                            listing.state = state_zip[0]
-                        if len(state_zip) >= 2:
-                            listing.zip = state_zip[1]
-                    break
-            except Exception:
-                continue
-        
-        # Extract rent
-        rent_selectors = [
-            '.price', '.rent', '.listing-price', '.cost',
-            '[data-price]', '.amount'
-        ]
-        for sel in rent_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    listing.rent_raw = (await el.text_content()).strip()
-                    listing.rent_min, listing.rent_max, listing.price_type = parse_rent(listing.rent_raw)
-                    listing.is_per_bed = listing.price_type == "per_bed"
-                    break
-            except Exception:
-                continue
-        
-        # Extract beds/baths
-        bed_bath_selectors = [
-            '.beds-baths', '.bed-bath', '.details',
-            '.listing-details', '.property-details'
-        ]
-        for sel in bed_bath_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    text = (await el.text_content()).strip()
-                    listing.beds, listing.baths = parse_beds_baths(text)
-                    break
-            except Exception:
-                continue
-        
-        # Extract sqft
-        sqft_selectors = ['.sqft', '.square-feet', '.size']
-        for sel in sqft_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    text = (await el.text_content()).strip()
-                    sqft_match = re.search(r'(\d+(?:,\d+)?)\s*(?:sq|sqft|sf)', text.lower())
-                    if sqft_match:
-                        listing.sqft = int(sqft_match.group(1).replace(',', ''))
-                    break
-            except Exception:
-                continue
-        
-        # Extract available date
-        date_selectors = [
-            '.available-date', '.availability', '.move-in',
-            '[data-available]', '.date'
-        ]
-        for sel in date_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    listing.available_date = (await el.text_content()).strip()
-                    break
-            except Exception:
-                continue
-        
-        # Extract amenities by looking for common keywords in page content
-        page_text = content.lower()
-        listing.has_in_unit_laundry = 'in-unit' in page_text and 'laundry' in page_text
-        listing.has_on_site_laundry = 'on-site laundry' in page_text or 'laundry room' in page_text
-        listing.has_dishwasher = 'dishwasher' in page_text
-        listing.has_ac = 'air condition' in page_text or ' a/c' in page_text or 'central air' in page_text
-        listing.has_heat_included = 'heat included' in page_text
-        listing.has_water_included = 'water included' in page_text
-        listing.has_internet_included = 'internet included' in page_text or 'wifi included' in page_text
-        listing.is_furnished = 'furnished' in page_text and 'unfurnished' not in page_text
-        listing.has_gym = 'gym' in page_text or 'fitness' in page_text
-        listing.has_pool = 'pool' in page_text
-        listing.has_parking_available = 'parking' in page_text
-        listing.has_garage = 'garage' in page_text
-        listing.pets_allowed = 'pet friendly' in page_text or 'pets allowed' in page_text
-        
-        # Extract property manager
-        manager_selectors = [
-            '.property-manager', '.landlord', '.management',
-            '.contact-name', '.owner'
-        ]
-        for sel in manager_selectors:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    listing.property_manager = (await el.text_content()).strip()
-                    break
-            except Exception:
-                continue
-        
-        logger.info(f"  ✓ Scraped: {listing.building_name or 'Unknown'} - ${listing.rent_raw}")
-        return listing
-        
-    except Exception as e:
-        logger.error(f"Error scraping listing {url}: {e}")
-        return None
-
-
-async def load_more_listings(page: Page) -> bool:
-    """Click 'Load More' or 'Show More' button if available."""
-    load_more_selectors = [
-        'button:has-text("Load More")',
-        'button:has-text("Show More")',
-        'a:has-text("Load More")',
-        '.load-more',
-        '.show-more',
-        '[data-load-more]',
-    ]
-    
-    for selector in load_more_selectors:
-        try:
-            button = await page.query_selector(selector)
-            if button:
-                await button.click()
-                await asyncio.sleep(2)
-                return True
-        except Exception:
-            continue
-    
-    return False
 
 
 def geocode_and_filter_units(units: List[UnitListing]) -> List[UnitListing]:
