@@ -1,0 +1,29 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 HelveticaNeue;}
+{\colortbl;\red255\green255\blue255;\red24\green26\blue30;\red244\green246\blue249;\red13\green80\blue209;
+\red214\green241\blue255;}
+{\*\expandedcolortbl;;\cssrgb\c12157\c13725\c15686;\cssrgb\c96471\c97255\c98039;\cssrgb\c3529\c41176\c85490;
+\cssrgb\c86667\c95686\c100000;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\deftab720
+\pard\pardeftab720\sa320\partightenfactor0
+
+\f0\fs28 \cf2 \cb3 \expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Site structure:\
+Home/Listings page ({\field{\*\fldinst{HYPERLINK "https://listings.umn.edu/listing"}}{\fldrslt \cf4 \cb5 \ul \ulc4 \strokec4 https://listings.umn.edu/listing}}): This page uses heavy JavaScript to load data, so a headless browser is necessary. At the top it shows filters for Beds, Baths and price (Per Unit vs. Per Person). Below the filters are neighbourhood tabs (e.g., Dinkytown, Marcy\uc0\u8209 Holmes, Como, Prospect\u8239 Park) that limit results to each area. Selecting a tab triggers an AJAX call to update the listings grid.\
+Listings grid: Each listing is displayed as a card (<div>), with an image, the property\'92s name, price range (e.g., "$1250.00\'96$3475.00"), bed range (e.g., \'931\'965\uc0\u8239 Bed\'94), and a brief address line (street + city). It also shows an \'93Available\'94 date and a small \'93Walk Time To Campus\'94 estimate. There is no traditional <a> link; clicking anywhere on the card triggers a JavaScript event to load the property details.\
+Property detail modal/page (?property=<id>): When you click a listing card, the site appends ?property=<id> to the URL and displays a modal overlay containing full property details. This modal includes:\
+Property name & full address (street address, city, state, ZIP).\
+Contact information (phone and email for the landlord).\
+Unit table: A <table> lists all available units. Columns include \'93Name\'94 (unit identifier), \'93Beds\'94, \'93Baths\'94, \'93Price From\'94, \'93Sq.Ft\'94, \'93Available\'94 (date), and sometimes \'93Tour\'94 (indicates if virtual tour is available). Each row corresponds to a different floorplan. This table is scrollable if there are many units.\
+Other data: The modal may also display a bed\uc0\u8209 range and price\u8209 range summary at the top (e.g., \'931\'965\u8239 Bed $1250.00\'96$3475.00\'94), along with images and a Street\u8209 View tab.\
+Important notes for scraping:\
+Because the site relies on JavaScript, requests/BeautifulSoup won\'92t work \'96 use Selenium/Playwright to drive a real browser.\
+After the initial page load, you may need to scroll to load more listings (infinite scroll). Use a loop to scroll to the bottom and wait for new cards until no more appear.\
+Each card click opens a modal; you should wait for the modal to render fully before extracting data. Use WebDriverWait on the modal\'92s unit table element.\
+Extract the property name, full address, bed range and price range from the modal header. Then parse each row of the unit table into a structured record (unit ID, beds, baths, price, square footage, availability date).\
+The site does not expose latitude/longitude, so to calculate dist_to_campus_km you\'92ll need to geocode the address yourself (e.g., with Nominatim or Google Geocoding API) and then compute the haversine distance to the campus coordinates (lat\uc0\u8239 =\u8239 44.9731, lon\u8239 =\u8239 \'9693.2359).\
+Close the modal after processing a property so you can click the next card. Use a short sleep or explicit wait to avoid overwhelming the site.\
+\pard\pardeftab720\partightenfactor0
+\cf2 Save the collected data to a CSV or Excel file with columns: listing_id (use the property ID from the URL), building_name, full_address, street, city, state, zip, beds, baths, size_sqft, rent_raw (price from column), rent_min/rent_max (same as rent_raw because only a single price is given per unit), available, unit_label, listing_url, landlord_phone, etc.\
+}
