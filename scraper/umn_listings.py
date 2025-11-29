@@ -52,8 +52,24 @@ NETWORKIDLE_TIMEOUT = 60000  # 60 seconds for network idle wait
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 5
 
-# Bot/captcha detection keywords
-BOT_BLOCK_KEYWORDS = ['captcha', 'unusual traffic', 'verify you are human', 'are you a robot', 'bot detection']
+# Bot/captcha detection settings
+MIN_PAGE_CONTENT_LENGTH = 2000  # Minimum content length for a valid page
+CHALLENGE_WAIT_TIMEOUT = 120  # Seconds to wait for user to complete challenge
+CHALLENGE_CHECK_INTERVAL = 5  # Seconds between checks during challenge wait
+
+# Bot/captcha detection keywords - these indicate a challenge page, not the actual listings
+# Be specific to avoid false positives from normal page content
+BOT_BLOCK_KEYWORDS = [
+    'please verify you are a human',
+    'checking your browser',
+    'just a moment',  # Cloudflare "Just a moment..."
+    'enable javascript and cookies',
+    'ray id',  # Cloudflare Ray ID
+    'challenge-platform',  # Cloudflare challenge
+    'cf-browser-verification',
+    'hcaptcha',
+    'recaptcha',
+]
 
 # Scroll settings
 SCROLL_DELAY_MIN = 0.8
@@ -242,11 +258,42 @@ def parse_beds_baths(text: str) -> tuple:
 
 
 def detect_bot_block(page_content: str) -> bool:
-    """Check if page content indicates bot blocking or captcha."""
+    """
+    Check if page content indicates bot blocking or captcha.
+    
+    Returns True only if:
+    1. A bot-block keyword is found, AND
+    2. No positive indicators of actual listing content are present
+    """
     content_lower = page_content.lower()
+    
+    # Positive indicators that the actual page loaded successfully
+    positive_indicators = [
+        'off-campus housing',
+        'rent college pads',
+        'listings.umn.edu',
+        'bedroom',
+        'apartment',
+        'housing',
+        '/listing/',  # URL patterns in the page
+        'property',
+        'lease',
+    ]
+    
+    # If we find positive indicators of real content, it's not a bot block
+    for indicator in positive_indicators:
+        if indicator in content_lower:
+            return False
+    
+    # Check for bot block keywords
     for keyword in BOT_BLOCK_KEYWORDS:
         if keyword in content_lower:
             return True
+    
+    # If page is very short and has no positive indicators, might be blocked
+    if len(page_content) < MIN_PAGE_CONTENT_LENGTH:
+        return True
+        
     return False
 
 
@@ -748,17 +795,50 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
                 
                 # Check for bot blocking/captcha
                 if detect_bot_block(page_content):
-                    logger.error("="*60)
-                    logger.error("BOT DETECTION / CAPTCHA DETECTED")
-                    logger.error("="*60)
-                    logger.error("The site appears to be blocking automated access.")
-                    logger.error("Suggestions:")
-                    logger.error("  1. Run with --headless=False to solve captcha manually")
-                    logger.error("  2. Try using a different network or VPN")
-                    logger.error("  3. Wait and try again later")
-                    logger.error("="*60)
-                    await browser.close()
-                    return None, None, None
+                    if not headless:
+                        # In non-headless mode, give user time to complete challenge
+                        logger.warning("="*60)
+                        logger.warning("CHALLENGE PAGE DETECTED")
+                        logger.warning("="*60)
+                        logger.warning("Please complete any challenge in the browser window.")
+                        logger.warning(f"Waiting up to {CHALLENGE_WAIT_TIMEOUT} seconds for you to complete it...")
+                        logger.warning("="*60)
+                        
+                        # Wait for challenge to be completed
+                        elapsed = 0
+                        
+                        while elapsed < CHALLENGE_WAIT_TIMEOUT:
+                            await asyncio.sleep(CHALLENGE_CHECK_INTERVAL)
+                            elapsed += CHALLENGE_CHECK_INTERVAL
+                            
+                            # Re-check page content
+                            page_content = await page.content()
+                            if not detect_bot_block(page_content):
+                                logger.info("Challenge completed! Continuing with scraping...")
+                                break
+                            
+                            remaining = CHALLENGE_WAIT_TIMEOUT - elapsed
+                            if remaining > 0:
+                                logger.info(f"Still waiting for challenge completion... ({remaining}s remaining)")
+                        
+                        # Final check
+                        page_content = await page.content()
+                        if detect_bot_block(page_content):
+                            logger.error("Challenge was not completed in time.")
+                            await browser.close()
+                            return None, None, None
+                    else:
+                        logger.error("="*60)
+                        logger.error("BOT DETECTION / CAPTCHA DETECTED")
+                        logger.error("="*60)
+                        logger.error("The site appears to be blocking automated access.")
+                        logger.error("Suggestions:")
+                        logger.error("  1. Run with --headless=False to solve captcha manually")
+                        logger.error("  2. Try using a different network or VPN")
+                        logger.error("  3. Wait and try again later")
+                        logger.error("="*60)
+                        await browser.close()
+                        return None, None, None
                 
                 # Check for common error pages
                 page_title = await page.title()
