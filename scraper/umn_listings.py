@@ -20,6 +20,7 @@ import random
 import re
 import sys
 import time
+import traceback
 from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime
 from math import radians, cos, sin, asin, sqrt
@@ -47,9 +48,29 @@ PAGE_DELAY_VARIANCE = 3.0
 GEOCODE_DELAY_SECONDS = 1.0
 
 # Navigation settings
-NAV_TIMEOUT = 90000  # 90 seconds for page load
+NAV_TIMEOUT = 120000  # 120 seconds for initial page load (domcontentloaded)
+NETWORKIDLE_TIMEOUT = 60000  # 60 seconds for network idle wait
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 5
+
+# Bot/captcha detection settings
+MIN_PAGE_CONTENT_LENGTH = 2000  # Minimum content length for a valid page
+CHALLENGE_WAIT_TIMEOUT = 120  # Seconds to wait for user to complete challenge
+CHALLENGE_CHECK_INTERVAL = 5  # Seconds between checks during challenge wait
+
+# Bot/captcha detection keywords - these indicate a challenge page, not the actual listings
+# Be specific to avoid false positives from normal page content
+BOT_BLOCK_KEYWORDS = [
+    'please verify you are a human',
+    'checking your browser',
+    'just a moment',  # Cloudflare "Just a moment..."
+    'enable javascript and cookies',
+    'ray id',  # Cloudflare Ray ID
+    'challenge-platform',  # Cloudflare challenge
+    'cf-browser-verification',
+    'hcaptcha',
+    'recaptcha',
+]
 
 # Scroll settings
 SCROLL_DELAY_MIN = 0.8
@@ -237,6 +258,46 @@ def parse_beds_baths(text: str) -> tuple:
     return beds, baths
 
 
+def detect_bot_block(page_content: str) -> bool:
+    """
+    Check if page content indicates bot blocking or captcha.
+    
+    Returns True only if:
+    1. A bot-block keyword is found, AND
+    2. No positive indicators of actual listing content are present
+    """
+    content_lower = page_content.lower()
+    
+    # Positive indicators that the actual page loaded successfully
+    positive_indicators = [
+        'off-campus housing',
+        'rent college pads',
+        'listings.umn.edu',
+        'bedroom',
+        'apartment',
+        'housing',
+        '/listing/',  # URL patterns in the page
+        'property',
+        'lease',
+    ]
+    
+    # If we find positive indicators of real content, it's not a bot block
+    for indicator in positive_indicators:
+        if indicator in content_lower:
+            return False
+    
+    # Check for bot block keywords
+    for keyword in BOT_BLOCK_KEYWORDS:
+        if keyword in content_lower:
+            return True
+    
+    # If page is very short and has no positive indicators, might be blocked
+    if len(page_content) < MIN_PAGE_CONTENT_LENGTH:
+        return True
+        
+    return False
+
+
 # ============================================================================
 # UMN LISTINGS SCRAPER
 # ============================================================================
@@ -268,46 +329,242 @@ async def extract_listing_urls(page: Page) -> List[str]:
     urls = set()
     
     try:
-        # Wait for listings to load
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        await asyncio.sleep(2)  # Extra wait for dynamic content
+        # Give page a moment to stabilize after load more clicks
+        await asyncio.sleep(3)
         
-        # Scroll to load all content
+        # Scroll to ensure all lazy-loaded content is visible
         await simulate_human_scrolling(page)
+        await asyncio.sleep(2)
+        
+        # Get all links on the page first for debugging
+        all_links = await page.query_selector_all('a')
+        logger.info(f"Total links found on page: {len(all_links)}")
+        
+        # Log a sample of hrefs for debugging
+        sample_hrefs = []
+        for link in all_links[:20]:
+            try:
+                href = await link.get_attribute('href')
+                if href:
+                    sample_hrefs.append(href)
+            except:
+                pass
+        logger.debug(f"Sample hrefs: {sample_hrefs}")
         
         # Try multiple selectors for listing links
+        # Rent College Pads uses various card/listing structures
         selectors = [
-            'a[href*="/listing/"]',
+            'a[href*="/listing/"]',  # Direct listing links
+            'a[href*="listings.umn.edu/listing/"]',  # Full URL listing links
             '.listing-card a',
-            '.property-card a',
+            '.property-card a', 
             'a.listing-link',
             '[data-listing-id] a',
             '.search-results a',
             'article a',
             '.card a',
+            '.MuiCard-root a',  # Material UI cards
+            '[class*="listing"] a',  # Any class containing "listing"
+            '[class*="property"] a',  # Any class containing "property"
+            '[class*="card"] a',  # Any class containing "card"
+            'div[class*="List"] a',  # List containers
         ]
         
         for selector in selectors:
             try:
                 links = await page.query_selector_all(selector)
+                logger.debug(f"Selector '{selector}' found {len(links)} elements")
                 for link in links:
                     href = await link.get_attribute('href')
                     if href:
                         # Make absolute URL if needed
                         if href.startswith('/'):
                             href = BASE_URL + href
-                        # Only include listing URLs
-                        if '/listing/' in href and href.startswith(BASE_URL):
-                            urls.add(href)
-            except Exception:
+                        # Only include listing URLs (check for listing path pattern)
+                        if '/listing/' in href:
+                            # Clean the URL
+                            if href.startswith('http'):
+                                urls.add(href)
+                            elif href.startswith('/'):
+                                urls.add(BASE_URL + href)
+            except Exception as e:
+                logger.debug(f"Selector '{selector}' error: {e}")
                 continue
+        
+        # Also try to find listing URLs in onclick handlers or data attributes
+        try:
+            all_elements = await page.query_selector_all('[onclick*="listing"], [data-href*="listing"], [data-url*="listing"]')
+            for el in all_elements:
+                onclick = await el.get_attribute('onclick') or ''
+                data_href = await el.get_attribute('data-href') or ''
+                data_url = await el.get_attribute('data-url') or ''
+                
+                for attr in [onclick, data_href, data_url]:
+                    if '/listing/' in attr:
+                        # Extract URL from attribute
+                        url_match = re.search(r'(/listing/[^\s\'"]+)', attr)
+                        if url_match:
+                            urls.add(BASE_URL + url_match.group(1))
+        except Exception as e:
+            logger.debug(f"Data attribute search error: {e}")
         
         logger.info(f"Found {len(urls)} listing URLs")
         
+        # Log sample URLs for verification
+        if urls:
+            sample = list(urls)[:3]
+            logger.info(f"Sample listing URLs: {sample}")
+        
     except Exception as e:
         logger.error(f"Error extracting listing URLs: {e}")
+        logger.debug(traceback.format_exc())
     
     return list(urls)
+
+
+async def scrape_listings_from_cards(page: Page) -> List[UnitListing]:
+    """
+    Scrape listing data directly from the listing cards on the main page.
+    
+    The UMN listings site shows cards with property info visible in the card itself:
+    - Property name
+    - Address (e.g., "2508 Delaware Street SE, Minneapolis, MN 55414")
+    - Bed count (e.g., "2 - 4 Bed")
+    - Featured badge
+    
+    We extract this info directly from the cards without clicking to avoid navigation issues.
+    """
+    listings = []
+    
+    try:
+        logger.info("Scraping listings directly from cards...")
+        
+        # Wait for content to settle
+        await asyncio.sleep(2)
+        
+        # Find cards using data-property-id which the site uses
+        card_selectors = [
+            '[data-property-id]',
+            '[data-listing-id]',
+            '[class*="listing-card"]',
+            '[class*="property-card"]', 
+            '[class*="ListingCard"]',
+            '[class*="PropertyCard"]',
+        ]
+        
+        # Find the best selector that returns cards
+        best_selector = None
+        cards = []
+        for selector in card_selectors:
+            try:
+                found = await page.query_selector_all(selector)
+                if found and len(found) > len(cards):
+                    cards = found
+                    best_selector = selector
+                    logger.debug(f"Card selector '{selector}' found {len(found)} cards")
+            except Exception:
+                continue
+        
+        if not cards:
+            logger.warning("No listing cards found on page")
+            return listings
+        
+        logger.info(f"Found {len(cards)} listing cards using selector: {best_selector}")
+        
+        # Process each card - extract data directly from card content
+        for idx, card in enumerate(cards):
+            try:
+                # Get the full text content from the card
+                card_text = await card.text_content() or ""
+                card_html = await card.inner_html() or ""
+                
+                # Try to get property ID from data attribute
+                property_id = await card.get_attribute('data-property-id') or await card.get_attribute('data-listing-id') or f"card_{idx}"
+                listing_id = f"umn_{property_id}"
+                
+                # Create listing object
+                listing = UnitListing(
+                    listing_id=listing_id,
+                    building_name="",
+                    full_address="",
+                    source_url=page.url,
+                    is_student_branded=True,
+                )
+                
+                # Parse card text to extract info
+                # Card text example: "The Quad on Delaware 2508 Delaware Street SE, Minneapolis, MN 55414    Featured     2 - 4 Bed"
+                lines = [line.strip() for line in card_text.split('\n') if line.strip()]
+                
+                # First line is usually the property name
+                if lines:
+                    listing.building_name = lines[0]
+                
+                # Look for address pattern (number + street + city, state zip)
+                # Pattern matches: "2508 Delaware Street SE, Minneapolis, MN 55414"
+                address_pattern = (
+                    r'(\d+\s+[^,]+(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Drive|Dr|Way|Lane|Ln|Court|Ct)[^,]*)'  # Street address
+                    r',?\s*(Minneapolis|St\.?\s*Paul|Saint Paul)'  # City
+                    r'[^,]*,?\s*(MN|Minnesota)?'  # State (optional)
+                    r'\s*(\d{5})?'  # ZIP code (optional)
+                )
+                address_match = re.search(address_pattern, card_text, re.IGNORECASE)
+                if address_match:
+                    listing.street = address_match.group(1).strip()
+                    listing.city = address_match.group(2).strip()
+                    listing.state = address_match.group(3).strip() if address_match.group(3) else 'MN'
+                    listing.zip = address_match.group(4).strip() if address_match.group(4) else ''
+                    listing.full_address = f"{listing.street}, {listing.city}, {listing.state} {listing.zip}".strip()
+                
+                # Look for bed count (e.g., "2 - 4 Bed", "3 Bed", "Studio")
+                # For ranges like "2 - 4 Bed", we store the minimum
+                bed_match = re.search(r'(\d+)\s*(?:-\s*(\d+))?\s*Bed', card_text, re.IGNORECASE)
+                if bed_match:
+                    listing.beds = float(bed_match.group(1))
+                elif 'studio' in card_text.lower():
+                    listing.beds = 0
+                
+                # Look for bath count
+                bath_match = re.search(r'(\d+(?:\.\d+)?)\s*Bath', card_text, re.IGNORECASE)
+                if bath_match:
+                    listing.baths = float(bath_match.group(1))
+                
+                # Look for price (e.g., "$1,200", "$800 - $1,500", "$650/bed")
+                price_pattern = r'\$[\d,]+(?:\s*[-–]\s*\$[\d,]+)?(?:\s*/\s*(?:mo|month|bed|person))?'
+                price_match = re.search(price_pattern, card_text, re.IGNORECASE)
+                if price_match:
+                    listing.rent_raw = price_match.group(0)
+                    listing.rent_min, listing.rent_max, listing.price_type = parse_rent(listing.rent_raw)
+                    listing.is_per_bed = 'bed' in listing.rent_raw.lower() or 'person' in listing.rent_raw.lower()
+                
+                # Try to get detail URL from card link
+                try:
+                    link = await card.query_selector('a')
+                    if link:
+                        href = await link.get_attribute('href')
+                        if href:
+                            if href.startswith('/'):
+                                href = 'https://listings.umn.edu' + href
+                            listing.source_url = href
+                except Exception:
+                    pass
+                
+                # Only add if we got at least a name or address
+                if listing.building_name or listing.full_address:
+                    listings.append(listing)
+                    if (idx + 1) % 50 == 0 or idx == 0:
+                        logger.info(f"  Processed {idx + 1}/{len(cards)} cards - Latest: {listing.building_name[:30] if listing.building_name else 'N/A'}...")
+                
+            except Exception as e:
+                logger.debug(f"Error processing card {idx}: {e}")
+                continue
+        
+        logger.info(f"Successfully extracted {len(listings)} listings from cards")
+        
+    except Exception as e:
+        logger.error(f"Error in scrape_listings_from_cards: {e}")
+        logger.debug(traceback.format_exc())
+    
+    return listings
 
 
 async def scrape_listing(page: Page, url: str) -> Optional[UnitListing]:
@@ -619,7 +876,7 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
     async with async_playwright() as p:
         # Use Firefox which is often better at avoiding detection
         selected_user_agent = random.choice(USER_AGENTS)
-        logger.info(f"Using user agent: {selected_user_agent[:50]}...")
+        logger.info(f"Using user agent: {selected_user_agent}")
         
         # Enhanced browser arguments for stealth
         browser_args = [
@@ -631,27 +888,22 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
             '--disable-site-isolation-trials',
         ]
         
-        browser = await p.chromium.launch(
-            headless=headless,
-            args=browser_args
-        )
-
-        # Enhanced context with more realistic settings
-        context = await browser.new_context(
-            user_agent=selected_user_agent,
-            viewport={'width': 1920, 'height': 1080},
-            locale='en-US',
-            timezone_id='America/Chicago',
-            java_script_enabled=True,
-            has_touch=False,
-            is_mobile=False,
-            device_scale_factor=1,
-            permissions=['geolocation'],
-            geolocation={'latitude': UMN_CAMPUS_LAT, 'longitude': UMN_CAMPUS_LON},
-        )
+        # Context options for browser - reused for Firefox fallback
+        context_options = {
+            'user_agent': selected_user_agent,
+            'viewport': {'width': 1920, 'height': 1080},
+            'locale': 'en-US',
+            'timezone_id': 'America/Chicago',
+            'java_script_enabled': True,
+            'has_touch': False,
+            'is_mobile': False,
+            'device_scale_factor': 1,
+            'permissions': ['geolocation'],
+            'geolocation': {'latitude': UMN_CAMPUS_LAT, 'longitude': UMN_CAMPUS_LON},
+        }
         
-        # Add script to hide automation indicators
-        await context.add_init_script("""
+        # Init script to hide automation indicators
+        init_script = """
             // Override the navigator.webdriver property
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
@@ -666,51 +918,153 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
             Object.defineProperty(navigator, 'languages', {
                 get: () => ['en-US', 'en']
             });
-        """)
-
-        page = await context.new_page()
-
+        """
+        
+        async def attempt_navigation(browser_type, browser_name: str):
+            """
+            Attempt to navigate to the listings page with the given browser.
+            
+            Returns:
+                Tuple of (browser, context, page) on success, or (None, None, None) on failure.
+            """
+            logger.info(f"Launching {browser_name} browser...")
+            if browser_name == "Chromium":
+                browser = await browser_type.launch(headless=headless, args=browser_args)
+            else:
+                browser = await browser_type.launch(headless=headless)
+            
+            context = await browser.new_context(**context_options)
+            await context.add_init_script(init_script)
+            page = await context.new_page()
+            
+            try:
+                # Navigate to listings page with retries
+                logger.info(f"Navigating to: {LISTING_PAGE}")
+                navigation_success = False
+                
+                for attempt in range(RETRY_ATTEMPTS):
+                    try:
+                        logger.info(f"Navigation attempt {attempt + 1}/{RETRY_ATTEMPTS} ({browser_name})...")
+                        # Step 1: Use domcontentloaded for initial HTML load (more reliable)
+                        await page.goto(LISTING_PAGE, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+                        
+                        # Step 2: Wait for network idle separately with its own timeout
+                        try:
+                            await page.wait_for_load_state('networkidle', timeout=NETWORKIDLE_TIMEOUT)
+                        except PlaywrightTimeout:
+                            logger.warning("Network idle timeout - continuing with partially loaded page")
+                        
+                        navigation_success = True
+                        break
+                    except PlaywrightTimeout as e:
+                        # Log detailed debugging info on timeout
+                        try:
+                            page_content = await page.content()
+                            content_len = len(page_content)
+                            snippet = page_content[:500] if page_content else "(empty)"
+                            logger.warning(f"Attempt {attempt + 1} timed out: {e}")
+                            logger.warning(f"Page content length: {content_len}")
+                            logger.debug(f"Page content snippet: {snippet}")
+                        except Exception:
+                            logger.warning(f"Attempt {attempt + 1} timed out: {e} (could not retrieve page content)")
+                        
+                        if attempt < RETRY_ATTEMPTS - 1:
+                            logger.info(f"Waiting {RETRY_DELAY} seconds before retry...")
+                            await asyncio.sleep(RETRY_DELAY)
+                    except Exception as e:
+                        logger.warning(f"Attempt {attempt + 1} failed: {e}")
+                        if attempt < RETRY_ATTEMPTS - 1:
+                            logger.info(f"Waiting {RETRY_DELAY} seconds before retry...")
+                            await asyncio.sleep(RETRY_DELAY)
+                
+                if not navigation_success:
+                    await browser.close()
+                    return None, None, None  # Signal failure
+                
+                # Wait for page to stabilize
+                await asyncio.sleep(5)
+                
+                # Check if page loaded correctly
+                page_content = await page.content()
+                if len(page_content) < 1000:
+                    logger.error("Page content seems too short - may not have loaded correctly")
+                    logger.info(f"Page content length: {len(page_content)}")
+                
+                # Check for bot blocking/captcha
+                if detect_bot_block(page_content):
+                    if not headless:
+                        # In non-headless mode, give user time to complete challenge
+                        logger.warning("="*60)
+                        logger.warning("CHALLENGE PAGE DETECTED")
+                        logger.warning("="*60)
+                        logger.warning("Please complete any challenge in the browser window.")
+                        logger.warning(f"Waiting up to {CHALLENGE_WAIT_TIMEOUT} seconds for you to complete it...")
+                        logger.warning("="*60)
+                        
+                        # Wait for challenge to be completed
+                        elapsed = 0
+                        
+                        while elapsed < CHALLENGE_WAIT_TIMEOUT:
+                            await asyncio.sleep(CHALLENGE_CHECK_INTERVAL)
+                            elapsed += CHALLENGE_CHECK_INTERVAL
+                            
+                            # Re-check page content
+                            page_content = await page.content()
+                            if not detect_bot_block(page_content):
+                                logger.info("Challenge completed! Continuing with scraping...")
+                                break
+                            
+                            remaining = CHALLENGE_WAIT_TIMEOUT - elapsed
+                            if remaining > 0:
+                                logger.info(f"Still waiting for challenge completion... ({remaining}s remaining)")
+                        
+                        # Final check
+                        page_content = await page.content()
+                        if detect_bot_block(page_content):
+                            logger.error("Challenge was not completed in time.")
+                            await browser.close()
+                            return None, None, None
+                    else:
+                        logger.error("="*60)
+                        logger.error("BOT DETECTION / CAPTCHA DETECTED")
+                        logger.error("="*60)
+                        logger.error("The site appears to be blocking automated access.")
+                        logger.error("Suggestions:")
+                        logger.error("  1. Run with --headless=False to solve captcha manually")
+                        logger.error("  2. Try using a different network or VPN")
+                        logger.error("  3. Wait and try again later")
+                        logger.error("="*60)
+                        await browser.close()
+                        return None, None, None
+                
+                # Check for common error pages
+                page_title = await page.title()
+                logger.info(f"Page title: {page_title}")
+                
+                return browser, context, page
+                
+            except Exception as e:
+                logger.error(f"Unexpected error during navigation: {e}")
+                await browser.close()
+                return None, None, None
+        
+        # Try Chromium first
+        browser, context, page = await attempt_navigation(p.chromium, "Chromium")
+        
+        # If Chromium fails, try Firefox as fallback
+        if browser is None:
+            logger.warning("="*60)
+            logger.warning("Chromium navigation failed. Attempting Firefox fallback...")
+            logger.warning("="*60)
+            browser, context, page = await attempt_navigation(p.firefox, "Firefox")
+        
+        if browser is None:
+            logger.error("All navigation attempts failed with both Chromium and Firefox.")
+            logger.error("Please check your internet connection and that listings.umn.edu is accessible.")
+            logger.error("If you're on a university network, you may need to use VPN or connect from a different network.")
+            return 0
+        
         try:
-            # Navigate to listings page with retries
-            logger.info(f"Navigating to: {LISTING_PAGE}")
-            navigation_success = False
-            
-            for attempt in range(RETRY_ATTEMPTS):
-                try:
-                    logger.info(f"Navigation attempt {attempt + 1}/{RETRY_ATTEMPTS}...")
-                    # Use 'load' first for initial page, more reliable
-                    await page.goto(LISTING_PAGE, wait_until="load", timeout=NAV_TIMEOUT)
-                    navigation_success = True
-                    break
-                except PlaywrightTimeout as e:
-                    logger.warning(f"Attempt {attempt + 1} timed out: {e}")
-                    if attempt < RETRY_ATTEMPTS - 1:
-                        logger.info(f"Waiting {RETRY_DELAY} seconds before retry...")
-                        await asyncio.sleep(RETRY_DELAY)
-                except Exception as e:
-                    logger.warning(f"Attempt {attempt + 1} failed: {e}")
-                    if attempt < RETRY_ATTEMPTS - 1:
-                        logger.info(f"Waiting {RETRY_DELAY} seconds before retry...")
-                        await asyncio.sleep(RETRY_DELAY)
-            
-            if not navigation_success:
-                logger.error("All navigation attempts failed.")
-                logger.error("Please check your internet connection and that listings.umn.edu is accessible.")
-                logger.error("If you're on a university network, you may need to use VPN or connect from a different network.")
-                return 0
-            
-            # Wait for page to stabilize
-            await asyncio.sleep(5)
-            
-            # Check if page loaded correctly
-            page_content = await page.content()
-            if len(page_content) < 1000:
-                logger.error("Page content seems too short - may not have loaded correctly")
-                logger.info(f"Page content length: {len(page_content)}")
-            
-            # Check for common error pages
-            page_title = await page.title()
-            logger.info(f"Page title: {page_title}")
             
             # Try to load all listings by clicking "Load More" multiple times
             load_attempts = 0
@@ -730,20 +1084,35 @@ async def main(headless: bool = True, max_listings: int = None) -> int:
                 listing_urls = listing_urls[:max_listings]
                 logger.info(f"Limited to {max_listings} listings")
             
-            # Scrape each listing
-            for idx, url in enumerate(listing_urls, 1):
-                logger.info(f"Processing listing {idx}/{len(listing_urls)}")
-                try:
-                    unit = await scrape_listing(page, url)
-                    if unit:
-                        all_units.append(unit)
-                        logger.info(f"Total units collected: {len(all_units)}")
-                except Exception as e:
-                    logger.error(f"Failed to scrape {url}: {e}")
+            # If we found URLs, scrape each listing individually
+            if listing_urls:
+                # Scrape each listing
+                for idx, url in enumerate(listing_urls, 1):
+                    logger.info(f"Processing listing {idx}/{len(listing_urls)}")
+                    try:
+                        unit = await scrape_listing(page, url)
+                        if unit:
+                            all_units.append(unit)
+                            logger.info(f"Total units collected: {len(all_units)}")
+                    except Exception as e:
+                        logger.error(f"Failed to scrape {url}: {e}")
+                    
+                    # Random delay between listings
+                    delay = get_random_delay()
+                    await asyncio.sleep(delay)
+            else:
+                # Fallback: scrape listings directly from cards on main page
+                logger.warning("No listing URLs found. Attempting to scrape from listing cards directly...")
+                card_listings = await scrape_listings_from_cards(page)
                 
-                # Random delay between listings
-                delay = get_random_delay()
-                await asyncio.sleep(delay)
+                if card_listings:
+                    logger.info(f"Successfully extracted {len(card_listings)} listings from cards")
+                    if max_listings:
+                        card_listings = card_listings[:max_listings]
+                    all_units.extend(card_listings)
+                else:
+                    logger.warning("Could not extract listings from cards either.")
+                    logger.warning("The page structure may have changed. Please report this issue.")
 
         finally:
             await browser.close()
