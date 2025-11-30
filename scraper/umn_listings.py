@@ -62,22 +62,23 @@ NEIGHBORHOODS = [
     "prospect-park",
 ]
 
-# Rate limiting settings - more conservative for university site
-PAGE_DELAY_SECONDS = 4.0
-PAGE_DELAY_VARIANCE = 3.0
-MODAL_WAIT_SECONDS = 2.0  # Wait for modal to render
+# Rate limiting settings - faster scraping while avoiding detection
+PAGE_DELAY_SECONDS = 2.0
+PAGE_DELAY_VARIANCE = 1.5
+MODAL_WAIT_SECONDS = 1.5  # Wait for modal to render
 GEOCODE_DELAY_SECONDS = 1.0
 
 # Navigation settings
-NAV_TIMEOUT = 90000  # 90 seconds for page load
-MODAL_TIMEOUT = 15000  # 15 seconds for modal to appear
+NAV_TIMEOUT = 60000  # 60 seconds for page load
+MODAL_TIMEOUT = 10000  # 10 seconds for modal to appear
 RETRY_ATTEMPTS = 3
-RETRY_DELAY = 5
+RETRY_DELAY = 3
 
 # Scroll settings for infinite scroll
-SCROLL_DELAY_MIN = 0.8
-SCROLL_DELAY_MAX = 2.0
-MAX_SCROLL_ATTEMPTS = 50  # Maximum scroll iterations to find all listings
+SCROLL_DELAY_MIN = 1.5
+SCROLL_DELAY_MAX = 3.0
+MAX_SCROLL_ATTEMPTS = 100  # Maximum scroll iterations to find all listings
+MAX_NO_CHANGE_SCROLLS = 5  # Number of scrolls without change before stopping
 
 # Content loading delay
 CONTENT_LOAD_DELAY = 1.0  # Seconds to wait for dynamic content to load
@@ -330,18 +331,34 @@ async def scroll_to_load_all_listings(page: Page) -> int:
     previous_count = 0
     no_change_count = 0
     
+    # First, scroll to bottom to trigger initial load
+    logger.info("Starting infinite scroll to load all listings...")
+    
     for scroll_attempt in range(MAX_SCROLL_ATTEMPTS):
-        # Scroll to bottom
+        # Get current scroll height
+        scroll_height = await page.evaluate("document.body.scrollHeight")
+        
+        # Scroll to bottom in steps for more realistic behavior
+        current_scroll = await page.evaluate("window.pageYOffset")
+        step_size = random.randint(500, 1000)
+        
+        while current_scroll < scroll_height:
+            current_scroll += step_size
+            await page.evaluate(f"window.scrollTo(0, {current_scroll})")
+            await asyncio.sleep(random.uniform(0.3, 0.6))
+        
+        # Final scroll to absolute bottom
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(random.uniform(1.0, 2.0))
+        await asyncio.sleep(random.uniform(SCROLL_DELAY_MIN, SCROLL_DELAY_MAX))
         
         # Count current cards - try multiple selectors
         card_selectors = [
             '[data-property-id]',  # Most specific
             '.listing-card',
             '.property-card',
-            'div[class*="listing"]',
-            'div[class*="property"]',
+            'div[class*="ListingCard"]',
+            'div[class*="listing-card"]',
+            'div[class*="property-card"]',
             'article',
         ]
         
@@ -358,13 +375,18 @@ async def scroll_to_load_all_listings(page: Page) -> int:
         
         if current_count == previous_count:
             no_change_count += 1
-            if no_change_count >= 3:
-                # No new cards after 3 scrolls, we've loaded everything
-                logger.info(f"Finished scrolling. Total cards found: {current_count}")
+            if no_change_count >= MAX_NO_CHANGE_SCROLLS:
+                # No new cards after several scrolls, we've loaded everything
+                logger.info(f"Finished scrolling after {scroll_attempt + 1} attempts. Total cards found: {current_count}")
                 break
         else:
             no_change_count = 0
             previous_count = current_count
+            logger.info(f"Scroll {scroll_attempt + 1}: Loaded {current_count} cards so far...")
+    
+    # Scroll back to top to reset view
+    await page.evaluate("window.scrollTo(0, 0)")
+    await asyncio.sleep(1)
     
     return previous_count
 
