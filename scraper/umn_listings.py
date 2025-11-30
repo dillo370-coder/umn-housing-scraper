@@ -618,25 +618,40 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
     - Contact info (phone, email)
     - Unit table with columns: Name, Beds, Baths, Price From, Sq.Ft, Available, Tour
     - Bed-range and price-range summary at top
+    - Amenities section with Property Highlights, Unit Features, Property Features
     """
     units = []
     
     try:
-        # Extract property name
+        # Wait a bit for content to load
+        await asyncio.sleep(1)
+        
+        # Get full page content for amenities extraction
+        page_content = await page.content()
+        page_text_lower = page_content.lower()
+        
+        # Extract property name - try multiple selectors
         building_name = ""
-        name_selectors = ['h1', '.property-name', '.property-title', '[class*="title"]']
+        name_selectors = [
+            'h1', 'h2', '.property-name', '.property-title', 
+            '[class*="title"]', '[class*="name"]', '.listing-name'
+        ]
         for sel in name_selectors:
             try:
-                el = await page.query_selector(sel)
-                if el:
+                elements = await page.query_selector_all(sel)
+                for el in elements:
                     text = (await el.text_content() or "").strip()
-                    if text and len(text) < 200:  # Reasonable name length
-                        building_name = text
-                        break
+                    # Filter out navigation/UI text
+                    if text and len(text) < 200 and len(text) > 2:
+                        if not any(skip in text.lower() for skip in ['menu', 'home', 'search', 'login', 'sign']):
+                            building_name = text
+                            break
+                if building_name:
+                    break
             except Exception:
                 continue
         
-        # Extract full address
+        # Extract full address - more comprehensive selectors
         full_address = ""
         street = ""
         city = ""
@@ -645,65 +660,107 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
         
         address_selectors = [
             '.address', '.property-address', '[class*="address"]',
-            '[itemprop="address"]', '.location'
+            '[itemprop="address"]', '.location', '[class*="location"]',
+            'address', '[data-address]'
         ]
         for sel in address_selectors:
             try:
-                el = await page.query_selector(sel)
-                if el:
-                    full_address = (await el.text_content() or "").strip()
-                    if full_address:
-                        # Parse address components
-                        parts = full_address.split(',')
-                        if len(parts) >= 1:
-                            street = parts[0].strip()
-                        if len(parts) >= 2:
-                            city = parts[1].strip()
-                        if len(parts) >= 3:
-                            state_zip = parts[2].strip().split()
-                            if len(state_zip) >= 1:
-                                state = state_zip[0]
-                            if len(state_zip) >= 2:
-                                zipcode = state_zip[1]
-                        break
+                elements = await page.query_selector_all(sel)
+                for el in elements:
+                    text = (await el.text_content() or "").strip()
+                    # Look for text that looks like an address (has numbers and street indicators)
+                    if text and len(text) > 5:
+                        # Check if it looks like a real address
+                        if any(indicator in text.lower() for indicator in ['ave', 'st', 'street', 'avenue', 'rd', 'drive', 'blvd', 'ln', 'way']):
+                            full_address = text.replace('\n', ', ').strip()
+                            break
+                if full_address:
+                    break
             except Exception:
                 continue
+        
+        # If still no address, try to find it in page text using regex
+        if not full_address:
+            # Look for Minneapolis/St. Paul addresses
+            address_patterns = [
+                r'(\d+\s+[\w\s]+(?:Ave|St|Street|Avenue|Rd|Road|Drive|Dr|Blvd|Boulevard|Lane|Ln|Way|Ct|Court)[^,]*,\s*(?:Minneapolis|St\.?\s*Paul)[^,]*,\s*MN\s*\d{5})',
+                r'(\d+\s+[\w\s]+,\s*(?:Minneapolis|St\.?\s*Paul),?\s*MN\s*\d{5})',
+            ]
+            for pattern in address_patterns:
+                match = re.search(pattern, page_content, re.IGNORECASE)
+                if match:
+                    full_address = match.group(1).strip()
+                    break
+        
+        # Parse address components
+        if full_address:
+            # Clean up the address
+            full_address = re.sub(r'\s+', ' ', full_address).strip()
+            parts = full_address.split(',')
+            if len(parts) >= 1:
+                street = parts[0].strip()
+            if len(parts) >= 2:
+                city = parts[1].strip()
+            if len(parts) >= 3:
+                state_zip = parts[2].strip().split()
+                if len(state_zip) >= 1:
+                    state = state_zip[0]
+                if len(state_zip) >= 2:
+                    zipcode = state_zip[1]
+            # Default city if not found
+            if not city:
+                city = "Minneapolis"
+            if not state:
+                state = "MN"
         
         # Extract contact info (phone and email)
         landlord_phone = ""
         landlord_email = ""
         
-        phone_selectors = ['.phone', '[class*="phone"]', 'a[href^="tel:"]', '[itemprop="telephone"]']
+        # Phone extraction
+        phone_selectors = [
+            'a[href^="tel:"]', '.phone', '[class*="phone"]', 
+            '[itemprop="telephone"]', '[data-phone]'
+        ]
         for sel in phone_selectors:
             try:
-                el = await page.query_selector(sel)
-                if el:
+                elements = await page.query_selector_all(sel)
+                for el in elements:
                     phone_text = await el.get_attribute('href') or await el.text_content()
                     if phone_text:
                         phone_text = phone_text.replace('tel:', '').strip()
-                        if re.match(r'[\d\-\(\)\s\+]+', phone_text):
-                            landlord_phone = phone_text
+                        # Validate phone number format
+                        phone_match = re.search(r'[\d\-\(\)\s\+\.]{10,}', phone_text)
+                        if phone_match:
+                            landlord_phone = phone_match.group(0).strip()
                             break
+                if landlord_phone:
+                    break
             except Exception:
                 continue
         
-        email_selectors = ['.email', '[class*="email"]', 'a[href^="mailto:"]', '[itemprop="email"]']
+        # Email extraction
+        email_selectors = [
+            'a[href^="mailto:"]', '.email', '[class*="email"]', 
+            '[itemprop="email"]', '[data-email]'
+        ]
         for sel in email_selectors:
             try:
-                el = await page.query_selector(sel)
-                if el:
+                elements = await page.query_selector_all(sel)
+                for el in elements:
                     email_text = await el.get_attribute('href') or await el.text_content()
                     if email_text:
                         email_text = email_text.replace('mailto:', '').strip()
                         if '@' in email_text:
                             landlord_email = email_text
                             break
+                if landlord_email:
+                    break
             except Exception:
                 continue
         
-        # Extract amenities from page content
-        page_text = (await page.content()).lower()
-        amenities = extract_amenities_from_text(page_text)
+        # Extract amenities from full page content
+        amenities = extract_amenities_from_text(page_text_lower)
         
         # Extract unit table rows
         # Table columns: Name, Beds, Baths, Price From, Sq.Ft, Available, Tour
@@ -712,6 +769,7 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
             '[class*="unit-table"]',
             '[class*="floor-plan"]',
             '[class*="pricing"]',
+            '[class*="units"]',
         ]
         
         rows_found = False
@@ -801,30 +859,63 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
             summary_text = ""
             summary_selectors = [
                 '[class*="summary"]', '[class*="overview"]',
-                '.bed-bath', '.price-range'
+                '.bed-bath', '.price-range', '[class*="detail"]',
+                '[class*="info"]', '[class*="specs"]'
             ]
             for sel in summary_selectors:
                 try:
-                    el = await page.query_selector(sel)
-                    if el:
+                    elements = await page.query_selector_all(sel)
+                    for el in elements:
                         summary_text += " " + (await el.text_content() or "")
                 except Exception:
                     continue
             
-            beds = parse_beds(summary_text) if summary_text else None
-            baths = parse_baths(summary_text) if summary_text else None
+            # Also try to extract from page content using regex
+            beds = None
+            baths = None
             
-            # Look for price
+            if summary_text:
+                beds = parse_beds(summary_text)
+                baths = parse_baths(summary_text)
+            
+            # Fallback: look for bed/bath patterns in page content
+            if beds is None:
+                bed_match = re.search(r'(\d+)\s*(?:bed|br|bedroom)', page_content, re.IGNORECASE)
+                if bed_match:
+                    beds = float(bed_match.group(1))
+                elif 'studio' in page_text_lower:
+                    beds = 0.0
+            
+            if baths is None:
+                bath_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:bath|ba|bathroom)', page_content, re.IGNORECASE)
+                if bath_match:
+                    baths = float(bath_match.group(1))
+            
+            # Look for price - more comprehensive selectors
             rent_raw = ""
-            price_selectors = ['.price', '[class*="price"]', '[class*="rent"]']
+            price_selectors = [
+                '.price', '[class*="price"]', '[class*="rent"]',
+                '[class*="cost"]', '[class*="rate"]'
+            ]
             for sel in price_selectors:
                 try:
-                    el = await page.query_selector(sel)
-                    if el:
-                        rent_raw = (await el.text_content() or "").strip()
+                    elements = await page.query_selector_all(sel)
+                    for el in elements:
+                        price_text = (await el.text_content() or "").strip()
+                        # Check if it looks like a price
+                        if '$' in price_text or re.search(r'\d{3,}', price_text):
+                            rent_raw = price_text
+                            break
+                    if rent_raw:
                         break
                 except Exception:
                     continue
+            
+            # Fallback: look for price in page content using regex
+            if not rent_raw:
+                price_match = re.search(r'\$[\d,]+(?:\s*[-–]\s*\$?[\d,]+)?(?:\s*/\s*(?:month|mo|bed))?', page_content)
+                if price_match:
+                    rent_raw = price_match.group(0)
             
             rent_min, rent_max, price_type = parse_rent(rent_raw)
             
@@ -861,23 +952,122 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
 
 
 def extract_amenities_from_text(text: str) -> Dict[str, Optional[bool]]:
-    """Extract amenity flags from page text."""
+    """
+    Extract amenity flags from page text.
+    
+    Based on UMN listings site structure, amenities are found in:
+    - Property Highlights section (laundry type, pet policy)
+    - Amenities section with categories: Parking, Unit Features, Property Features
+    
+    Sample amenities from listing 60211:
+    - Unit Features: Air Conditioning, Dishwasher, Furnished, Washer & Dryer, etc.
+    - Property Features: Fitness Center, Laundry On-Site, Pets Allowed, Cats, Dogs, etc.
+    """
     text_lower = text.lower()
+    
+    # In-unit laundry: look for "washer & dryer", "washer/dryer", "in-unit laundry", "w/d in unit"
+    has_in_unit_laundry = any(phrase in text_lower for phrase in [
+        'washer & dryer', 'washer/dryer', 'washer and dryer',
+        'in-unit laundry', 'in unit laundry', 'w/d in unit',
+        'laundry in unit', 'in-unit washer', 'in unit washer'
+    ])
+    
+    # On-site laundry: "laundry on-site", "laundry room", "laundry facilities", "on-site laundry"
+    has_on_site_laundry = any(phrase in text_lower for phrase in [
+        'laundry on-site', 'laundry on site', 'on-site laundry', 'on site laundry',
+        'laundry room', 'laundry facilities', 'shared laundry', 'common laundry'
+    ])
+    
+    # Dishwasher
+    has_dishwasher = 'dishwasher' in text_lower
+    
+    # Air conditioning: "air conditioning", "a/c", "central air", "central heat and air"
+    has_ac = any(phrase in text_lower for phrase in [
+        'air conditioning', 'air conditioner', 'a/c', 'ac ',
+        'central air', 'central heat and air', 'hvac', 'climate control'
+    ])
+    
+    # Heat included: look for explicit "heat included" or utility inclusion mentions
+    has_heat_included = any(phrase in text_lower for phrase in [
+        'heat included', 'heating included', 'heat & water included',
+        'utilities included'  # Often means heat is included
+    ])
+    
+    # Water included
+    has_water_included = any(phrase in text_lower for phrase in [
+        'water included', 'water & sewer included', 'heat & water included',
+        'water/sewer included'
+    ])
+    
+    # Internet included: "internet included", "wifi included", "internet ready" is NOT included
+    has_internet_included = any(phrase in text_lower for phrase in [
+        'internet included', 'wifi included', 'wi-fi included',
+        'free internet', 'free wifi', 'free wi-fi'
+    ])
+    # Note: "internet ready" or "cable ready" means available but NOT included
+    
+    # Furnished: check for "furnished" but exclude "unfurnished"
+    is_furnished = (
+        'furnished' in text_lower and 
+        'unfurnished' not in text_lower and
+        'semi-furnished' not in text_lower
+    )
+    
+    # Gym/Fitness: "fitness center", "gym", "fitness room", "24 hour fitness"
+    has_gym = any(phrase in text_lower for phrase in [
+        'fitness center', 'fitness room', 'gym', 'exercise room',
+        '24 hour fitness', 'workout room', 'fitness facility'
+    ])
+    
+    # Pool
+    has_pool = any(phrase in text_lower for phrase in [
+        'pool', 'swimming pool', 'indoor pool', 'outdoor pool'
+    ]) and 'ping pong' not in text_lower  # Avoid false positive from "ping pong"
+    
+    # Rooftop/Clubroom: "rooftop", "club room", "clubhouse", "entertainment room", "lounge"
+    has_rooftop_or_clubroom = any(phrase in text_lower for phrase in [
+        'rooftop', 'roof deck', 'club room', 'clubroom', 'clubhouse',
+        'entertainment room', 'community room', 'resident lounge', 'lounge'
+    ])
+    
+    # Parking available: "parking", but not just "no parking"
+    has_parking_available = (
+        'parking' in text_lower and 
+        'no parking' not in text_lower
+    ) or 'garage' in text_lower
+    
+    # Garage parking specifically
+    has_garage = any(phrase in text_lower for phrase in [
+        'garage parking', 'garage', 'underground parking', 'covered parking'
+    ])
+    
+    # Pets allowed: "pets allowed", "pet friendly", "cats", "dogs"
+    pets_allowed = any(phrase in text_lower for phrase in [
+        'pets allowed', 'pet friendly', 'pet-friendly', 'cats allowed',
+        'dogs allowed', 'cats ok', 'dogs ok'
+    ])
+    # Also check if cats or dogs are mentioned as amenities
+    if not pets_allowed:
+        # If "cats" or "dogs" appear as standalone amenities (not "no cats", "no dogs")
+        if ('cats' in text_lower and 'no cats' not in text_lower) or \
+           ('dogs' in text_lower and 'no dogs' not in text_lower):
+            pets_allowed = True
+    
     return {
-        'has_in_unit_laundry': 'in-unit' in text_lower and 'laundry' in text_lower,
-        'has_on_site_laundry': 'on-site laundry' in text_lower or 'laundry room' in text_lower,
-        'has_dishwasher': 'dishwasher' in text_lower,
-        'has_ac': 'air condition' in text_lower or ' a/c' in text_lower or 'central air' in text_lower,
-        'has_heat_included': 'heat included' in text_lower,
-        'has_water_included': 'water included' in text_lower,
-        'has_internet_included': 'internet included' in text_lower or 'wifi included' in text_lower,
-        'is_furnished': 'furnished' in text_lower and 'unfurnished' not in text_lower,
-        'has_gym': 'gym' in text_lower or 'fitness' in text_lower,
-        'has_pool': 'pool' in text_lower,
-        'has_rooftop_or_clubroom': 'rooftop' in text_lower or 'clubhouse' in text_lower or 'club room' in text_lower,
-        'has_parking_available': 'parking' in text_lower,
-        'has_garage': 'garage' in text_lower,
-        'pets_allowed': 'pet friendly' in text_lower or 'pets allowed' in text_lower,
+        'has_in_unit_laundry': has_in_unit_laundry,
+        'has_on_site_laundry': has_on_site_laundry,
+        'has_dishwasher': has_dishwasher,
+        'has_ac': has_ac,
+        'has_heat_included': has_heat_included,
+        'has_water_included': has_water_included,
+        'has_internet_included': has_internet_included,
+        'is_furnished': is_furnished,
+        'has_gym': has_gym,
+        'has_pool': has_pool,
+        'has_rooftop_or_clubroom': has_rooftop_or_clubroom,
+        'has_parking_available': has_parking_available,
+        'has_garage': has_garage,
+        'pets_allowed': pets_allowed,
     }
 
 
