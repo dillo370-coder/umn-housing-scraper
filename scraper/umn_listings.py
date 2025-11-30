@@ -79,6 +79,22 @@ SCROLL_DELAY_MIN = 0.8
 SCROLL_DELAY_MAX = 2.0
 MAX_SCROLL_ATTEMPTS = 50  # Maximum scroll iterations to find all listings
 
+# Content loading delay
+CONTENT_LOAD_DELAY = 1.0  # Seconds to wait for dynamic content to load
+
+# Address extraction patterns
+STREET_INDICATORS = ['ave', 'st', 'street', 'avenue', 'rd', 'road', 'drive', 'dr', 'blvd', 'boulevard', 'lane', 'ln', 'way', 'ct', 'court']
+SKIP_TEXT_TERMS = ['menu', 'home', 'search', 'login', 'sign', 'navigation', 'footer', 'header']
+
+# Pre-compiled regex patterns for performance
+ADDRESS_PATTERNS = [
+    re.compile(r'(\d+\s+[\w\s]+(?:Ave|St|Street|Avenue|Rd|Road|Drive|Dr|Blvd|Boulevard|Lane|Ln|Way|Ct|Court)[^,]*,\s*(?:Minneapolis|St\.?\s*Paul)[^,]*,\s*MN\s*\d{5})', re.IGNORECASE),
+    re.compile(r'(\d+\s+[\w\s]+,\s*(?:Minneapolis|St\.?\s*Paul),?\s*MN\s*\d{5})', re.IGNORECASE),
+]
+PRICE_PATTERN = re.compile(r'\$[\d,]+(?:\s*[-–]\s*\$?[\d,]+)?(?:\s*/\s*(?:month|mo|bed))?')
+BED_PATTERN = re.compile(r'(\d+)\s*(?:bed|br|bedroom)', re.IGNORECASE)
+BATH_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*(?:bath|ba|bathroom)', re.IGNORECASE)
+
 # User agents - more variety helps avoid detection
 USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -623,8 +639,8 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
     units = []
     
     try:
-        # Wait a bit for content to load
-        await asyncio.sleep(1)
+        # Wait for content to load
+        await asyncio.sleep(CONTENT_LOAD_DELAY)
         
         # Get full page content for amenities extraction
         page_content = await page.content()
@@ -643,7 +659,7 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
                     text = (await el.text_content() or "").strip()
                     # Filter out navigation/UI text
                     if text and len(text) < 200 and len(text) > 2:
-                        if not any(skip in text.lower() for skip in ['menu', 'home', 'search', 'login', 'sign']):
+                        if not any(skip in text.lower() for skip in SKIP_TEXT_TERMS):
                             building_name = text
                             break
                 if building_name:
@@ -671,7 +687,7 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
                     # Look for text that looks like an address (has numbers and street indicators)
                     if text and len(text) > 5:
                         # Check if it looks like a real address
-                        if any(indicator in text.lower() for indicator in ['ave', 'st', 'street', 'avenue', 'rd', 'drive', 'blvd', 'ln', 'way']):
+                        if any(indicator in text.lower() for indicator in STREET_INDICATORS):
                             full_address = text.replace('\n', ', ').strip()
                             break
                 if full_address:
@@ -682,12 +698,8 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
         # If still no address, try to find it in page text using regex
         if not full_address:
             # Look for Minneapolis/St. Paul addresses
-            address_patterns = [
-                r'(\d+\s+[\w\s]+(?:Ave|St|Street|Avenue|Rd|Road|Drive|Dr|Blvd|Boulevard|Lane|Ln|Way|Ct|Court)[^,]*,\s*(?:Minneapolis|St\.?\s*Paul)[^,]*,\s*MN\s*\d{5})',
-                r'(\d+\s+[\w\s]+,\s*(?:Minneapolis|St\.?\s*Paul),?\s*MN\s*\d{5})',
-            ]
-            for pattern in address_patterns:
-                match = re.search(pattern, page_content, re.IGNORECASE)
+            for pattern in ADDRESS_PATTERNS:
+                match = pattern.search(page_content)
                 if match:
                     full_address = match.group(1).strip()
                     break
@@ -880,14 +892,14 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
             
             # Fallback: look for bed/bath patterns in page content
             if beds is None:
-                bed_match = re.search(r'(\d+)\s*(?:bed|br|bedroom)', page_content, re.IGNORECASE)
+                bed_match = BED_PATTERN.search(page_content)
                 if bed_match:
                     beds = float(bed_match.group(1))
                 elif 'studio' in page_text_lower:
                     beds = 0.0
             
             if baths is None:
-                bath_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:bath|ba|bathroom)', page_content, re.IGNORECASE)
+                bath_match = BATH_PATTERN.search(page_content)
                 if bath_match:
                     baths = float(bath_match.group(1))
             
@@ -913,7 +925,7 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
             
             # Fallback: look for price in page content using regex
             if not rent_raw:
-                price_match = re.search(r'\$[\d,]+(?:\s*[-–]\s*\$?[\d,]+)?(?:\s*/\s*(?:month|mo|bed))?', page_content)
+                price_match = PRICE_PATTERN.search(page_content)
                 if price_match:
                     rent_raw = price_match.group(0)
             
@@ -1019,10 +1031,9 @@ def extract_amenities_from_text(text: str) -> Dict[str, Optional[bool]]:
         '24 hour fitness', 'workout room', 'fitness facility'
     ])
     
-    # Pool
-    has_pool = any(phrase in text_lower for phrase in [
-        'pool', 'swimming pool', 'indoor pool', 'outdoor pool'
-    ]) and 'ping pong' not in text_lower  # Avoid false positive from "ping pong"
+    # Pool - use word boundary to avoid false positives like "ping pong" or "carpool"
+    has_pool = bool(re.search(r'\b(?:swimming\s+)?pool\b', text_lower)) or \
+               any(phrase in text_lower for phrase in ['indoor pool', 'outdoor pool'])
     
     # Rooftop/Clubroom: "rooftop", "club room", "clubhouse", "entertainment room", "lounge"
     has_rooftop_or_clubroom = any(phrase in text_lower for phrase in [
