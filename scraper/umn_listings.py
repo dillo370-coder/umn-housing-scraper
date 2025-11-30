@@ -1355,31 +1355,40 @@ async def main(headless: bool = True, max_listings: int = None, neighborhood: st
                 property_ids = property_ids[:max_listings]
                 logger.info(f"Limited to {max_listings} listings")
             
-            # Scrape each property by opening its modal
+            # Scrape each property by navigating directly to its URL
+            # No need to go back to listing page between properties
             for idx, prop_id in enumerate(property_ids, 1):
                 logger.info(f"Processing property {idx}/{len(property_ids)}: {prop_id}")
                 try:
-                    # Open the property modal
-                    if await open_property_modal(page, prop_id):
-                        # Wait for modal to fully render
-                        await asyncio.sleep(MODAL_WAIT_SECONDS)
-                        
-                        # Extract data from modal
-                        units = await extract_property_from_modal(page, prop_id)
-                        
-                        # Add neighborhood info if filtering
-                        if neighborhood:
-                            for unit in units:
-                                unit.neighborhood = neighborhood
-                        
+                    # Navigate directly to property page
+                    property_url = f"{LISTING_PAGE}?property={prop_id}"
+                    await page.goto(property_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+                    
+                    # Wait for content to fully render
+                    await asyncio.sleep(MODAL_WAIT_SECONDS)
+                    
+                    # Verify we're on the right page
+                    if prop_id not in page.url:
+                        logger.warning(f"Navigation to property {prop_id} may have failed, URL: {page.url}")
+                        continue
+                    
+                    # Extract data from the property page
+                    units = await extract_property_from_modal(page, prop_id)
+                    
+                    # Add neighborhood info if filtering
+                    if neighborhood:
+                        for unit in units:
+                            unit.neighborhood = neighborhood
+                    
+                    if units:
                         all_units.extend(units)
+                        logger.info(f"Extracted {len(units)} units from property {prop_id}")
                         logger.info(f"Total units collected: {len(all_units)}")
-                        
-                        # Close modal before processing next property
-                        await close_property_modal(page)
                     else:
-                        logger.warning(f"Could not open modal for property {prop_id}")
+                        logger.warning(f"No units extracted from property {prop_id}")
                         
+                except PlaywrightTimeout as e:
+                    logger.warning(f"Timeout scraping property {prop_id}: {e}")
                 except Exception as e:
                     logger.error(f"Failed to scrape property {prop_id}: {e}")
                 
