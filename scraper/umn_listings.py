@@ -4,12 +4,19 @@ UMN Listings (listings.umn.edu) Web Scraper
 Scrapes the official University of Minnesota Off-Campus Housing Marketplace
 (powered by Rent College Pads) for student housing listings.
 
-IMPORTANT: This site is powered by Rent College Pads and may have bot protection.
-The scraper uses enhanced stealth settings to work around these restrictions.
+SITE STRUCTURE:
+- Home page: https://listings.umn.edu/listing
+- Heavy JavaScript - requires headless browser (Playwright)
+- Listing cards: Displayed as <div>, clicking triggers JS to open modal
+- Property modal: URL becomes ?property=<id>
+- Modal contains: property name, full address, contact info, amenities
+- Infinite scroll to load all listings
+- No lat/lon exposed - addresses must be geocoded
 
 Usage:
   python3 -m scraper.umn_listings --headless=False  # test run with visible browser
   python3 -m scraper.umn_listings --headless=True   # full headless run
+  python3 -m scraper.umn_listings --max_listings=10  # limit to 10 listings
 """
 import argparse
 import asyncio
@@ -25,6 +32,7 @@ from datetime import datetime
 from math import radians, cos, sin, asin, sqrt
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Set
+from urllib.parse import urljoin, urlparse, parse_qs
 
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 import requests
@@ -41,19 +49,36 @@ SEARCH_RADIUS_KM = 10.0  # 10 km radius
 BASE_URL = "https://listings.umn.edu"
 LISTING_PAGE = f"{BASE_URL}/listing"
 
-# Rate limiting settings - more conservative for university site
-PAGE_DELAY_SECONDS = 4.0
-PAGE_DELAY_VARIANCE = 3.0
+# Rate limiting settings
+PAGE_DELAY_SECONDS = 2.0
+PAGE_DELAY_VARIANCE = 1.5
+MODAL_WAIT_SECONDS = 2.0  # Wait for modal to render
 GEOCODE_DELAY_SECONDS = 1.0
 
 # Navigation settings
-NAV_TIMEOUT = 90000  # 90 seconds for page load
+NAV_TIMEOUT = 60000  # 60 seconds for page load
+MODAL_TIMEOUT = 15000  # 15 seconds for modal to appear
 RETRY_ATTEMPTS = 3
-RETRY_DELAY = 5
+RETRY_DELAY = 3
 
-# Scroll settings
-SCROLL_DELAY_MIN = 0.8
+# Scroll settings for infinite scroll
+SCROLL_DELAY_MIN = 1.0
 SCROLL_DELAY_MAX = 2.0
+MAX_SCROLL_ATTEMPTS = 100
+MAX_NO_CHANGE_SCROLLS = 5
+
+# Text patterns to skip when extracting building names
+SKIP_TEXT_TERMS = [
+    'menu', 'home', 'search', 'login', 'sign', 'navigation', 'footer', 'header',
+    'close', 'back', 'submit', 'cancel', 'button', 'click', 'load', 'loading',
+    'featured', 'bed', 'bath', 'unit', 'share', 'map', 'tour', 'apply', 'contact'
+]
+
+# Address extraction patterns
+ADDRESS_PATTERNS = [
+    re.compile(r'(\d+\s+[\w\s]+(?:Ave|St|Street|Avenue|Rd|Road|Drive|Dr|Blvd|Boulevard|Lane|Ln|Way|Ct|Court)[^,]*,\s*(?:Minneapolis|St\.?\s*Paul)[^,]*,\s*MN\s*\d{5})', re.IGNORECASE),
+    re.compile(r'(\d+\s+[\w\s]+,\s*(?:Minneapolis|St\.?\s*Paul),?\s*MN\s*\d{5})', re.IGNORECASE),
+]
 
 # User agents - more variety helps avoid detection
 USER_AGENTS = [
