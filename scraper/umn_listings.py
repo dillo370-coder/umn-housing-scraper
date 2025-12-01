@@ -85,7 +85,7 @@ CONTENT_LOAD_DELAY = 1.0  # Seconds to wait for dynamic content to load
 
 # Address extraction patterns
 STREET_INDICATORS = ['ave', 'st', 'street', 'avenue', 'rd', 'road', 'drive', 'dr', 'blvd', 'boulevard', 'lane', 'ln', 'way', 'ct', 'court']
-SKIP_TEXT_TERMS = ['menu', 'home', 'search', 'login', 'sign', 'navigation', 'footer', 'header']
+SKIP_TEXT_TERMS = ['menu', 'home', 'search', 'login', 'sign', 'navigation', 'footer', 'header', 'close', 'back', 'submit', 'cancel', 'button', 'click', 'load', 'loading']
 
 # Pre-compiled regex patterns for performance
 ADDRESS_PATTERNS = [
@@ -661,33 +661,64 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
     units = []
     
     try:
-        # Wait for content to load
-        await asyncio.sleep(CONTENT_LOAD_DELAY)
+        # Wait for content to load - increased wait time for reliable extraction
+        await asyncio.sleep(CONTENT_LOAD_DELAY + 1.0)
         
         # Get full page content for amenities extraction
         page_content = await page.content()
-        page_text_lower = page_content.lower()
+        page_text = await page.evaluate("document.body.innerText")
+        page_text_lower = page_text.lower() if page_text else page_content.lower()
         
-        # Extract property name - try multiple selectors
+        # Debug: log page URL to confirm we're on right page
+        current_url = page.url
+        logger.debug(f"Extracting from URL: {current_url}")
+        
+        # Extract property name - be more specific about heading elements
         building_name = ""
+        # Try site-specific selectors first (Rent College Pads / UMN listings structure)
         name_selectors = [
-            'h1', 'h2', '.property-name', '.property-title', 
-            '[class*="title"]', '[class*="name"]', '.listing-name'
+            'h1.property-title', 'h1.listing-title', 'h1.name',
+            '.property-name h1', '.property-name', '.listing-name',
+            'h1:not(.sr-only)', 'h2:not(.sr-only)',
+            '[class*="PropertyTitle"]', '[class*="ListingTitle"]',
+            'main h1', 'article h1',
         ]
         for sel in name_selectors:
             try:
                 elements = await page.query_selector_all(sel)
                 for el in elements:
                     text = (await el.text_content() or "").strip()
-                    # Filter out navigation/UI text
-                    if text and len(text) < 200 and len(text) > 2:
-                        if not any(skip in text.lower() for skip in SKIP_TEXT_TERMS):
-                            building_name = text
-                            break
+                    # More aggressive filtering of UI elements
+                    if text and len(text) < 150 and len(text) > 3:
+                        text_lower = text.lower()
+                        # Skip if it's clearly a UI element
+                        if any(skip in text_lower for skip in SKIP_TEXT_TERMS):
+                            continue
+                        # Skip if it's just numbers or special characters
+                        if re.match(r'^[\d\s\-\+\(\)\.]+$', text):
+                            continue
+                        # Skip if it matches price pattern
+                        if re.match(r'^\$[\d,\.]+', text):
+                            continue
+                        building_name = text
+                        logger.debug(f"Found building name: {building_name}")
+                        break
                 if building_name:
                     break
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Name selector {sel} failed: {e}")
                 continue
+        
+        # If no name found via selectors, try regex on page content
+        if not building_name:
+            # Try to extract from page title
+            try:
+                title = await page.title()
+                if title and '|' in title:
+                    building_name = title.split('|')[0].strip()
+                    logger.debug(f"Got building name from title: {building_name}")
+            except Exception:
+                pass
         
         # Extract full address - more comprehensive selectors
         full_address = ""
@@ -699,7 +730,7 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
         address_selectors = [
             '.address', '.property-address', '[class*="address"]',
             '[itemprop="address"]', '.location', '[class*="location"]',
-            'address', '[data-address]'
+            'address', '[data-address]', '[class*="Address"]'
         ]
         for sel in address_selectors:
             try:
@@ -711,6 +742,7 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
                         # Check if it looks like a real address
                         if any(indicator in text.lower() for indicator in STREET_INDICATORS):
                             full_address = text.replace('\n', ', ').strip()
+                            logger.debug(f"Found address via selector: {full_address}")
                             break
                 if full_address:
                     break
@@ -724,7 +756,23 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
                 match = pattern.search(page_content)
                 if match:
                     full_address = match.group(1).strip()
+                    logger.debug(f"Found address via regex: {full_address}")
                     break
+        
+        # Last resort: search page text for address patterns
+        if not full_address and page_text:
+            # Look for lines that contain street indicators
+            lines = page_text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if len(line) > 10 and len(line) < 100:
+                    if any(ind in line.lower() for ind in STREET_INDICATORS):
+                        if re.search(r'\d+', line):  # Has a number (street number)
+                            # Check it's not a price
+                            if '$' not in line:
+                                full_address = line
+                                logger.debug(f"Found address from page text: {full_address}")
+                                break
         
         # Parse address components
         if full_address:
@@ -889,12 +937,15 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
         
         # If no table found, create a single listing from header info
         if not rows_found or not units:
+            logger.debug(f"No unit table found for property {property_id}, extracting from page content")
+            
             # Try to get bed/bath/price from summary at top of modal
             summary_text = ""
             summary_selectors = [
                 '[class*="summary"]', '[class*="overview"]',
                 '.bed-bath', '.price-range', '[class*="detail"]',
-                '[class*="info"]', '[class*="specs"]'
+                '[class*="info"]', '[class*="specs"]', '[class*="beds"]',
+                '[class*="baths"]', '[class*="price"]'
             ]
             for sel in summary_selectors:
                 try:
@@ -904,41 +955,70 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
                 except Exception:
                     continue
             
+            # Also add page text for parsing
+            summary_text += " " + (page_text or "")
+            
             # Also try to extract from page content using regex
             beds = None
             baths = None
+            sqft = None
             
-            if summary_text:
-                beds = parse_beds(summary_text)
-                baths = parse_baths(summary_text)
+            # Try more specific patterns first
+            bed_patterns = [
+                r'(\d+)\s*(?:bed(?:room)?s?|br|BR)',
+                r'(\d+)\s*-\s*\d+\s*(?:bed|br)',  # Range like "1-5 bed"
+                r'beds?:\s*(\d+)',
+            ]
+            for pattern in bed_patterns:
+                match = re.search(pattern, summary_text, re.IGNORECASE)
+                if match:
+                    beds = float(match.group(1))
+                    logger.debug(f"Found beds: {beds}")
+                    break
             
-            # Fallback: look for bed/bath patterns in page content
-            if beds is None:
-                bed_match = BED_PATTERN.search(page_content)
-                if bed_match:
-                    beds = float(bed_match.group(1))
-                elif 'studio' in page_text_lower:
-                    beds = 0.0
+            if beds is None and 'studio' in summary_text.lower():
+                beds = 0.0
+                logger.debug("Found studio (0 beds)")
             
-            if baths is None:
-                bath_match = BATH_PATTERN.search(page_content)
-                if bath_match:
-                    baths = float(bath_match.group(1))
+            # Bath patterns
+            bath_patterns = [
+                r'(\d+(?:\.\d+)?)\s*(?:bath(?:room)?s?|ba|BA)',
+                r'baths?:\s*(\d+(?:\.\d+)?)',
+            ]
+            for pattern in bath_patterns:
+                match = re.search(pattern, summary_text, re.IGNORECASE)
+                if match:
+                    baths = float(match.group(1))
+                    logger.debug(f"Found baths: {baths}")
+                    break
+            
+            # Sqft patterns
+            sqft_patterns = [
+                r'(\d{3,})\s*(?:sq\.?\s*ft\.?|sqft|sf)',
+                r'size:\s*(\d{3,})',
+            ]
+            for pattern in sqft_patterns:
+                match = re.search(pattern, summary_text, re.IGNORECASE)
+                if match:
+                    sqft = int(match.group(1))
+                    logger.debug(f"Found sqft: {sqft}")
+                    break
             
             # Look for price - more comprehensive selectors
             rent_raw = ""
             price_selectors = [
                 '.price', '[class*="price"]', '[class*="rent"]',
-                '[class*="cost"]', '[class*="rate"]'
+                '[class*="cost"]', '[class*="rate"]', '[class*="Price"]'
             ]
             for sel in price_selectors:
                 try:
                     elements = await page.query_selector_all(sel)
                     for el in elements:
                         price_text = (await el.text_content() or "").strip()
-                        # Check if it looks like a price
-                        if '$' in price_text or re.search(r'\d{3,}', price_text):
+                        # Check if it looks like a price (has $ or 3+ digit number)
+                        if '$' in price_text:
                             rent_raw = price_text
+                            logger.debug(f"Found rent via selector: {rent_raw}")
                             break
                     if rent_raw:
                         break
@@ -947,9 +1027,17 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
             
             # Fallback: look for price in page content using regex
             if not rent_raw:
-                price_match = PRICE_PATTERN.search(page_content)
-                if price_match:
-                    rent_raw = price_match.group(0)
+                # Try multiple price patterns
+                price_patterns = [
+                    r'\$[\d,]+(?:\s*[-–]\s*\$?[\d,]+)?(?:\s*/\s*(?:month|mo|bed))?',
+                    r'\$\d{3,}',
+                ]
+                for pattern in price_patterns:
+                    match = re.search(pattern, summary_text)
+                    if match:
+                        rent_raw = match.group(0)
+                        logger.debug(f"Found rent via regex: {rent_raw}")
+                        break
             
             rent_min, rent_max, price_type = parse_rent(rent_raw)
             
@@ -963,6 +1051,7 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
                 zip=zipcode,
                 beds=beds,
                 baths=baths,
+                sqft=sqft,
                 rent_raw=rent_raw,
                 rent_min=rent_min,
                 rent_max=rent_max,
@@ -976,6 +1065,9 @@ async def extract_property_from_modal(page: Page, property_id: str) -> List[Unit
                 **amenities
             )
             units.append(unit)
+            
+            # Log what we extracted for debugging
+            logger.debug(f"Created unit: beds={beds}, baths={baths}, sqft={sqft}, rent={rent_raw}")
         
         logger.info(f"Extracted {len(units)} units from property {property_id}: {building_name}")
         
